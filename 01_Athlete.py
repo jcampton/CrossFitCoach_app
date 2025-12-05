@@ -1,0 +1,865 @@
+# 01_Athlete.py
+# Athlete-facing Streamlit UI to select Program & Session, view prescribed work, and log actuals (append-only).
+# Guard rails: never crash on missing data; append-only CSV; tolerant Program/Session linking; unit + rounding fallbacks.
+# Uses OneRMs sheet as the single source of truth for load prescriptions.
+
+from __future__ import annotations
+
+import json
+import re
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Reuse IO + helpers from coach_io (centralised Arrow helper)
+# ──────────────────────────────────────────────────────────────────────────────
+from coach_io import (
+    load_settings,
+    load_excel_tables,
+    pick_series,
+    round_to_increment,
+    ensure_arrow_compat,   # centralized Arrow-safe display helper
+    # shared load computation + OneRM lookup
+    compute_prescribed_loads,
+    build_one_rm_lookup,
+)
+
+try:
+    # Prefer the shared implementation so all pages agree on where files live
+    from coach_io import derive_paths  # type: ignore
+except Exception:
+    # Fallback: robust local version (handles Windows backslashes & relative names)
+    def derive_paths(cfg: dict) -> dict:
+        excel = cfg.get("data_path") or cfg.get("excel_path")
+        if not excel:
+            raise ValueError("settings.json needs 'excel_path' (or 'data_path').")
+        base = Path(str(excel).replace("\\", "/")).resolve()
+
+        def _resolve_next_to_base(value, default_name):
+            if not value:
+                return base.with_name(default_name)
+            p = Path(str(value).replace("\\", "/"))
+            # If user supplied a simple filename, place it next to the workbook
+            if not p.is_absolute() and (p.parent == Path("") or str(p).find("/") < 0):
+                return base.with_name(p.name)
+            return p
+
+        log_csv    = _resolve_next_to_base(cfg.get("log_csv"),    "SessionsMovements_Log.csv")
+        closed_csv = _resolve_next_to_base(cfg.get("closed_csv"), "Sessions_Closed.csv")
+        return {"excel": base, "log_csv": log_csv, "closed_csv": closed_csv}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Page config
+# ──────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Athlete — Log Training", layout="wide")
+st.title("🏋️ Athlete — Log Training")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Append-only logging helpers
+# ──────────────────────────────────────────────────────────────────────────────
+def mk_log_id() -> str:
+    """Unique LogID: timestamp + short random tail."""
+    return f"LOG_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4().int)[:6]}"
+
+_LOG_COLS = [
+    "LogID", "SessionID", "MovementID",
+    "Sets_Prescribed", "Reps_Prescribed", "Load_Prescribed", "Pct1RM_Prescribed",
+    "Sets_Actual", "Reps_Actual", "Load_Actual", "RPE", "Notes", "Timestamp"
+]
+
+# Typed map for reading log CSVs safely
+LOG_DTYPE_MAP: dict[str, str] = {
+    "LogID": "string",
+    "SessionID": "string",
+    "MovementID": "string",
+    "Sets_Prescribed": "Int64",
+    "Reps_Prescribed": "Int64",
+    "Load_Prescribed": "Float64",
+    "Pct1RM_Prescribed": "Float64",
+    "Sets_Actual": "Int64",
+    "Reps_Actual": "Int64",
+    "Load_Actual": "Float64",
+    "RPE": "Int64",
+    "Notes": "string",
+    "Timestamp": "string",  # parse to dt in code where needed
+}
+
+def ensure_log_csv(path: Path) -> None:
+    """Create the log CSV if missing; if malformed, back it up and recreate with correct header."""
+    p = Path(path)
+    if not p.exists():
+        pd.DataFrame(columns=_LOG_COLS).to_csv(p, index=False)
+        return
+    try:
+        head = pd.read_csv(p, nrows=5)
+        have = set(head.columns)
+        need = set(_LOG_COLS)
+        if not need.issubset(have):
+            backup = p.with_suffix(p.suffix + f".bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+            p.rename(backup)
+            pd.DataFrame(columns=_LOG_COLS).to_csv(p, index=False)
+    except Exception:
+        backup = p.with_suffix(p.suffix + f".corrupt_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        try:
+            p.rename(backup)
+        except Exception:
+            pass
+        pd.DataFrame(columns=_LOG_COLS).to_csv(p, index=False)
+
+def append_log_row(path: Path, row: dict) -> None:
+    """Append one row to the log CSV (schema-safe)."""
+    ensure_log_csv(path)
+    safe = {col: row.get(col, pd.NA) for col in _LOG_COLS}
+    pd.DataFrame([safe], columns=_LOG_COLS).to_csv(path, mode="a", header=False, index=False)
+
+def read_csv_typed(path: Path, usecols: list[str] | None = None) -> pd.DataFrame:
+    """Read CSV with safe dtypes (only for columns present)."""
+    ensure_log_csv(path)
+    try:
+        # Only specify dtypes for the columns we are reading (and that exist in the dtype map)
+        if usecols is None:
+            dtype = {k: v for k, v in LOG_DTYPE_MAP.items() if v != "datetime64[ns]"}
+        else:
+            dtype = {k: v for k, v in LOG_DTYPE_MAP.items() if k in usecols and v != "datetime64[ns]"}
+        df = pd.read_csv(path, usecols=usecols, dtype=dtype)
+    except Exception:
+        df = pd.DataFrame(columns=usecols or _LOG_COLS)
+    return df
+
+def get_session_logs(path: Path, session_id: str) -> pd.DataFrame:
+    """All log rows for a SessionID (sorted by Timestamp if present)."""
+    df = read_csv_typed(path)
+    if df.empty:
+        return df
+    if "Timestamp" in df.columns:
+        # parse Timestamp into dt for sorting
+        dt = pd.to_datetime(df["Timestamp"].astype(str), errors="coerce")
+        df = df.assign(_dt=dt).sort_values("_dt").drop(columns=["_dt"])
+    if "SessionID" in df.columns:
+        return df[df["SessionID"].astype(str) == str(session_id)].copy()
+    return pd.DataFrame()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Closed-session registry helpers
+# ──────────────────────────────────────────────────────────────────────────────
+def ensure_closed_csv(path: Path) -> None:
+    if not path.exists():
+        cols = ["SessionID", "ClosedBy", "ClosedAt", "Notes"]
+        pd.DataFrame(columns=cols).to_csv(path, index=False)
+
+def load_closed_sessions(path: Path) -> pd.DataFrame:
+    ensure_closed_csv(path)
+    return pd.read_csv(path)
+
+def is_session_closed(path: Path, session_id: str) -> bool:
+    df = load_closed_sessions(path)
+    return session_id in set(df["SessionID"].astype(str))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Small parsing helpers
+# ──────────────────────────────────────────────────────────────────────────────
+def safe_int(x, default=0):
+    try:
+        if pd.isna(x):
+            return default
+        return int(x)
+    except Exception:
+        return default
+
+def safe_float(x, default=None):
+    try:
+        if pd.isna(x) or x == "":
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Complex reps parser
+# ──────────────────────────────────────────────────────────────────────────────
+def parse_complex_reps(val):
+    try:
+        if pd.isna(val):
+            return None, None
+    except Exception:
+        pass
+    s = str(val).strip()
+    if not s:
+        return None, None
+
+    if s.isdigit():
+        return int(s), None
+
+    def _norm(p):
+        p = re.sub(r'[^0-9\+]+', '+', p)
+        p = re.sub(r'\++', '+', p).strip('+')
+        return p
+
+    m = re.match(r'^\s*(\d+)\s*(?:x|×)?\s*[\(\[]\s*([0-9\+\s,]+)\s*[\)\]]\s*$', s)
+    if m:
+        return int(m.group(1)), _norm(m.group(2))
+
+    m = re.match(r'^\s*(\d+)\s*(?:x|×)\s*([0-9\+\s,]+)\s*$', s)
+    if m:
+        return int(m.group(1)), _norm(m.group(2))
+
+    if re.match(r'^\s*[0-9\+\s,]+\s*$', s):
+        return None, _norm(s)
+
+    return None, None
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Movement history helpers (cached)
+# ──────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def _load_logs_minimal(path: Path) -> pd.DataFrame:
+    """Load minimal columns once; cached for speed."""
+    cols = ["MovementID","Sets_Actual","Reps_Actual","Load_Actual","RPE","Notes","Timestamp"]
+    df = read_csv_typed(path, usecols=cols)
+    if df.empty:
+        return pd.DataFrame(columns=cols + ["dt"])
+    df["dt"] = pd.to_datetime(df["Timestamp"].astype(str), errors="coerce")
+    df = df.dropna(subset=["dt"])
+    df["MovementID"] = df["MovementID"].astype("string")
+    return df
+
+def _render_last_n_logs_for_movement(logs_df: pd.DataFrame, movement_id: str, n: int = 3) -> None:
+    if logs_df.empty:
+        st.caption("History: none yet")
+        return
+    sub = logs_df[logs_df["MovementID"] == str(movement_id)].sort_values("dt", ascending=False).head(n)
+    if sub.empty:
+        st.caption("History: none yet")
+        return
+
+    lines = []
+    for _, r in sub.iterrows():
+        date = r["dt"].strftime("%d/%m")
+        sets = safe_int(r.get("Sets_Actual"), 0)
+        reps = safe_int(r.get("Reps_Actual"), 0)
+        load = r.get("Load_Actual")
+        load_str = f" @ {float(load):g}" if pd.notna(load) else ""
+
+        rpe_val = r.get("RPE")
+        rpe_str = f"  • RPE {int(rpe_val)}" if pd.notna(rpe_val) and safe_int(rpe_val, 0) > 0 else ""
+
+        note_val = r.get("Notes", "")
+        if pd.isna(note_val):
+            note = ""
+        else:
+            note = str(note_val).strip()
+            if note.lower() in ("nan", "none"):
+                note = ""
+        note_str = f"  • {note[:80]}" if note else ""
+
+        lines.append(f"- {date}  • {sets}×{reps}{load_str}{rpe_str}{note_str}")
+
+    st.markdown("**History (last 3):**\n" + "\n".join(lines))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Completion / progress helpers
+# ──────────────────────────────────────────────────────────────────────────────
+def build_completion_map(log_path: Path) -> dict[str, str]:
+    """SessionID -> last log date (dd/mm/YYYY) for marking sessions as complete."""
+    df = read_csv_typed(log_path, usecols=["SessionID", "Timestamp"])
+    if df.empty or "SessionID" not in df.columns:
+        return {}
+    df["SessionID"] = df["SessionID"].astype("string")
+    df["dt"] = pd.to_datetime(df["Timestamp"].astype(str), errors="coerce")
+    df = df.dropna(subset=["SessionID", "dt"])
+    if df.empty:
+        return {}
+    last = df.groupby("SessionID")["dt"].max()
+    return {sid: d.strftime("%d/%m/%Y") for sid, d in last.items()}
+
+def program_progress_for_selected(sel_join: str,
+                                  progs_df: pd.DataFrame,
+                                  sess_df: pd.DataFrame,
+                                  log_path: Path) -> dict:
+    """Return dict with completed, total, percent for the selected program."""
+    try:
+        logs = read_csv_typed(log_path, usecols=["SessionID"])
+        log_sids = set(logs["SessionID"].astype(str))
+    except Exception:
+        log_sids = set()
+
+    sess_sel = sess_df[sess_df["_JOIN"] == sel_join]
+    total = int(len(sess_sel))
+
+    if total == 0:
+        return {"completed": 0, "total": 0, "percent": 0}
+
+    completed = 0
+    if "SessionID" in sess_sel.columns and sess_sel["SessionID"].notna().any():
+        known = set(sess_sel["SessionID"].astype(str))
+        completed = len(log_sids & known)
+    else:
+        def _derive_progcode(row) -> str:
+            pc = row.get("ProgramCode")
+            if isinstance(pc, str) and pc.strip():
+                return pc.strip()
+            nm = str(row.get("Name", "PRG")).upper().strip()
+            s = re.sub(r'[^A-Z0-9]+', '-', nm)
+            s = re.sub(r'-+', '-', s).strip('-')
+            return s[:24] if s else "PRG"
+
+        progs_df["_ProgCode_fallback"] = progs_df.apply(_derive_progcode, axis=1)
+        name_to_progcode = dict(zip(progs_df.get("_pname"), progs_df["_ProgCode_fallback"]))
+        join_to_progcode = {r["_JOIN"]: name_to_progcode.get(r["_pname"], "PRG")
+                            for _, r in progs_df[["_JOIN", "_pname"]].drop_duplicates().iterrows()}
+        prefix = f"{join_to_progcode.get(sel_join, 'PRG')}-"
+        completed = len({sid for sid in log_sids if str(sid).startswith(prefix)})
+
+    pct = int(round((completed / total) * 100)) if total else 0
+    return {"completed": completed, "total": total, "percent": pct}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Load settings, resolve paths, and read tables
+# ──────────────────────────────────────────────────────────────────────────────
+cfg = load_settings("data/settings.json")
+paths = derive_paths(cfg)
+
+_raw = load_excel_tables(paths["excel"])
+tables = {
+    "programs":          _raw.get(cfg["sheets"]["programs"], pd.DataFrame()),
+    "sessions":          _raw.get(cfg["sheets"]["sessions"], pd.DataFrame()),
+    "session_movements": _raw.get(cfg["sheets"]["session_movements"], pd.DataFrame()),
+    "movement_library":  _raw.get(cfg["sheets"]["movements"], pd.DataFrame()),
+    # OneRMs (single source for prescriptions)
+    "one_rms":           _raw.get(cfg["sheets"]["one_rms"], pd.DataFrame()),
+}
+
+progs = tables["programs"].copy()
+sess  = tables["sessions"].copy()
+movs  = tables["session_movements"].copy()
+lib   = tables["movement_library"].copy()
+one_rms_df = tables["one_rms"].copy()
+
+# Guard: missing core sheets
+if progs.empty or sess.empty or movs.empty:
+    st.error("Missing required sheets. Ensure your workbook has 'Programs', 'Sessions', and 'SessionMovements'.")
+    st.stop()
+
+# Ensure CSVs exist / are well-formed
+ensure_log_csv(paths["log_csv"])
+ensure_closed_csv(paths["closed_csv"])
+
+# Sidebar: quick settings + display preferences
+with st.sidebar:
+    st.subheader("Settings")
+    st.code(json.dumps({
+        "excel_path": str(paths["excel"]),
+        "log_csv": str(paths["log_csv"]),
+        "closed_csv": str(paths["closed_csv"]),
+        "sheets": cfg.get("sheets", {})
+    }, indent=2), language="json")
+    st.caption("Edit data/settings.json to change the Excel path / sheet names. "
+               "The log and closed-session CSVs live next to the workbook.")
+
+    disp_cfg = cfg.get("display", {})
+    round_inc = disp_cfg.get("round_increment", 2.5)
+    default_unit = disp_cfg.get("default_unit", "kg")
+
+    # Keep: hide completed toggle
+    hide_completed = st.checkbox(
+        "Hide completed sessions",
+        value=st.session_state.get("hide_completed", True),
+        key="hide_completed",
+        help="Hide sessions that already have at least one log."
+    )
+
+# Sanitize display options
+try:
+    round_inc = float(round_inc)
+    if round_inc <= 0 or pd.isna(round_inc):
+        round_inc = 0.0  # gracefully skip rounding
+except Exception:
+    round_inc = 0.0
+
+default_unit = (str(default_unit).strip() or "kg")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Program / Session selectors (robust, with synthetic SessionID fallback)
+# ──────────────────────────────────────────────────────────────────────────────
+st.subheader("Select Program & Session")
+
+def _norm_text(x):
+    try:
+        if pd.isna(x):
+            return None
+    except Exception:
+        pass
+    s = str(x).strip().lower()
+    s = re.sub(r'[^a-z0-9]+', '_', s)
+    s = re.sub(r'_+', '_', s).strip('_')
+    return s
+
+# Programs: normalised name
+progs["_pname"] = progs.get("Name", pd.Series([None]*len(progs))).apply(_norm_text)
+
+# Sessions: try to extract program name from ProgramID like 'PRG_HSPU_8W_20250810_001'
+sess["_pname_from_pid"] = sess.get("ProgramID", pd.Series([None]*len(sess))).astype(str).str.strip().str.lower()
+sess["_pname_from_pid"] = sess["_pname_from_pid"] \
+    .str.replace(r'^prg_', '', regex=True) \
+    .str.replace(r'_\d{8}(_\d+)?$', '', regex=True) \
+    .str.replace(r'[^a-z0-9]+', '_', regex=True) \
+    .str.strip('_')
+
+# Default join key = program name
+progs["_JOIN"] = progs["_pname"]
+sess["_JOIN"]  = sess["_pname_from_pid"]
+
+# If both sides have usable ProgramID values that overlap, prefer ID join
+if "ProgramID" in progs.columns and progs["ProgramID"].notna().any() and sess["ProgramID"].notna().any():
+    progs["_pid_norm"] = progs["ProgramID"].astype(str).str.strip().str.lower()
+    sess["_pid_norm"]  = sess["ProgramID"].astype(str).str.strip().str.lower()
+    if set(progs["_pid_norm"]) & set(sess["_pid_norm"]):
+        progs["_JOIN"] = progs["_pid_norm"]
+        sess["_JOIN"]  = sess["_pid_norm"]
+
+# ── NEW: Filter programs by Status only (dates ignored)
+ACTIVE_STATUSES = {s.upper().strip() for s in cfg.get("program_active_statuses", ["ACTIVE", "IN PROGRESS"])}
+
+if 'show_active_programs_only' not in st.session_state:
+    st.session_state['show_active_programs_only'] = True  # default ON
+
+show_active_only = st.checkbox(
+    "Show active programs only",
+    value=st.session_state['show_active_programs_only'],
+    help=f"Active when Programs[Status] is in {sorted(ACTIVE_STATUSES)}"
+)
+st.session_state['show_active_programs_only'] = show_active_only
+
+progs_view = progs.copy()
+if show_active_only:
+    if "Status" in progs_view.columns:
+        status_norm = progs_view["Status"].astype(str).str.upper().str.strip()
+        mask = status_norm.isin(ACTIVE_STATUSES)
+        if mask.any():
+            progs_view = progs_view[mask]
+        else:
+            st.info("No programs have an active Status. Showing all programs for now.")
+            progs_view = progs.copy()
+    else:
+        st.info("Programs sheet has no 'Status' column. Showing all programs.")
+        progs_view = progs.copy()
+
+# Program dropdown (plain label; badge below)
+progs["Label"] = progs.get("Name", progs.get("ProgramCode", progs.get("ProgramID", ""))).astype(str)
+progs_view["Label"] = progs_view.get("Name", progs_view.get("ProgramCode", progs_view.get("ProgramID", ""))).astype(str)
+
+prog_options_src = progs_view if not progs_view.empty else progs
+if prog_options_src.empty:
+    st.error("Programs sheet has no identifiable programs (no Name/ProgramID).")
+    st.stop()
+
+prog_options = prog_options_src[["_JOIN", "Label"]].dropna().drop_duplicates().reset_index(drop=True)
+
+sel_prog_label = st.selectbox("Program", options=prog_options["Label"].tolist())
+sel_prog_join  = prog_options.loc[prog_options["Label"] == sel_prog_label, "_JOIN"].iloc[0]
+
+# Optional caption of visible programs
+st.caption("Visible programs: " + ", ".join(prog_options["Label"].astype(str).tolist()))
+
+# Program progress badge
+prog_prog = program_progress_for_selected(sel_prog_join, progs, sess, paths["log_csv"])
+badge_text = f"**Completed:** {prog_prog['completed']} / {prog_prog['total']} ({prog_prog['percent']}%)"
+st.markdown(badge_text)
+st.progress(prog_prog["percent"] / 100 if prog_prog["total"] else 0.0)
+
+# Sessions for the chosen program
+sess_prog = sess[sess["_JOIN"] == sel_prog_join].copy()
+
+# Fallback: still nothing? Let you pick any key present in Sessions
+if sess_prog.empty:
+    st.warning("No sessions matched that Program. Using program keys found in the Sessions sheet so you can continue.")
+    sess_keys = sorted(sess["_JOIN"].dropna().unique().tolist())
+    if not sess_keys:
+        st.error("Your Sessions sheet has no rows. Add sessions in Excel.")
+        st.stop()
+    sel_prog_join = st.selectbox("Program (from Sessions)", options=sess_keys, key="alt_prog_select")
+    sess_prog = sess[sess["_JOIN"] == sel_prog_join].copy()
+
+# ── Ensure we have a SessionID (synthesize if blank): <ProgramCode>-<SessionCode>-<seq2>
+def _derive_progcode(row) -> str:
+    pc = row.get("ProgramCode")
+    if isinstance(pc, str) and pc.strip():
+        return pc.strip()
+    nm = str(row.get("Name", "PRG")).upper().strip()
+    s = re.sub(r'[^A-Z0-9]+', '-', nm)
+    s = re.sub(r'-+', '-', s).strip('-')
+    return s[:24] if s else "PRG"
+
+progs["_ProgCode_fallback"] = progs.apply(_derive_progcode, axis=1)
+name_to_progcode = dict(zip(progs["_pname"], progs["_ProgCode_fallback"]))
+
+if "SessionID" not in sess_prog.columns or sess_prog["SessionID"].isna().all():
+    sess_prog = sess_prog.copy()
+    if "_pname" not in sess_prog.columns or sess_prog["_pname"].isna().all():
+        sess_prog["_pname"] = sess_prog["_JOIN"]  # when JOIN is name-based
+    sess_prog["ProgramCode_synth"] = sess_prog["_pname"].map(name_to_progcode).fillna("PRG")
+    if "Date" in sess_prog.columns:
+        sess_prog = sess_prog.sort_values("Date").reset_index(drop=True)
+    else:
+        sess_prog = sess_prog.reset_index(drop=True)
+    n_codes = max(1, int((sess_prog.get("SessionCode", pd.Series(dtype=object)).dropna().nunique()) or 3))
+    seq_idx = (pd.Series(range(len(sess_prog))) // n_codes) + 1
+    sess_prog["_seq2"] = seq_idx.astype(int)
+    def _mk_sid(r):
+        scode = str(r.get("SessionCode", "S")).strip()
+        return f"{r['ProgramCode_synth']}-{scode}-{int(r['_seq2']):02d}"
+    sess_prog["SessionID"] = sess_prog.apply(_mk_sid, axis=1)
+
+# Human-friendly session label
+if "SessionLabel" in sess_prog.columns and sess_prog["SessionLabel"].notna().any():
+    sess_prog["Label"] = sess_prog["SessionLabel"].astype(str)
+elif "SessionID" in sess_prog.columns:
+    sess_prog["Label"] = sess_prog["SessionID"].astype(str)
+else:
+    sess_prog["Label"] = sess_prog.apply(lambda r: f"{r.get('SessionCode','?')} — {r.get('Date','')}", axis=1)
+
+# Completion badge + display label
+completion_map = build_completion_map(paths["log_csv"])
+sess_prog["CompletedOn"] = sess_prog["SessionID"].astype(str).map(completion_map)
+sess_prog["Completed"] = sess_prog["CompletedOn"].notna() & (sess_prog["CompletedOn"] != "")
+sess_prog["LabelDisplay"] = sess_prog.apply(
+    lambda r: f"{r['Label']} — ✓ Complete ({r['CompletedOn']})" if r["Completed"] else r["Label"],
+    axis=1
+)
+
+# Hide completed sessions if chosen
+if hide_completed:
+    sess_prog = sess_prog[~sess_prog["Completed"]].copy()
+    if sess_prog.empty:
+        st.info("All sessions in this program are complete. Uncheck “Hide completed sessions” in the sidebar to show them.")
+        st.stop()
+
+# Gentle sort (no custom sorting by completion; keep original date/order)
+if "Date" in sess_prog.columns:
+    sess_prog["_sort_date"] = pd.to_datetime(sess_prog["Date"], errors="coerce")
+    sort_cols = ["_sort_date"]
+    if "SessionOrder" in sess_prog.columns: sort_cols.append("SessionOrder")
+    if "SessionCode" in sess_prog.columns:  sort_cols.append("SessionCode")
+    sess_prog = sess_prog.sort_values(sort_cols, na_position="last").drop(columns=["_sort_date"], errors="ignore")
+elif "SessionOrder" in sess_prog.columns:
+    sess_prog = sess_prog.sort_values(["SessionOrder", "SessionCode"] if "SessionCode" in sess_prog.columns else ["SessionOrder"])
+
+# Session picker
+sel_sess_label = st.selectbox("Session", options=sess_prog["LabelDisplay"].tolist())
+sel_sess = sess_prog.loc[sess_prog["LabelDisplay"] == sel_sess_label, "SessionID"].iloc[0]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Closed/open banner + toggle actions
+# ──────────────────────────────────────────────────────────────────────────────
+this_closed = is_session_closed(paths["closed_csv"], sel_sess)
+if this_closed:
+    st.info("🔒 This session is **closed**. Logging is disabled.")
+else:
+    st.success("✅ This session is **open** for logging.")
+
+left, right = st.columns(2)
+with left:
+    if not this_closed and st.button("🔒 Close session"):
+        df = load_closed_sessions(paths["closed_csv"])
+        df = pd.concat([df, pd.DataFrame([{
+            "SessionID": sel_sess,
+            "ClosedBy": "User",  # TODO: replace with real username for multi-user
+            "ClosedAt": datetime.now().isoformat(timespec="seconds"),
+            "Notes": ""
+        }])], ignore_index=True)
+        df.to_csv(paths["closed_csv"], index=False)
+        st.experimental_rerun()
+with right:
+    if this_closed and st.button("🔓 Reopen session"):
+        df = load_closed_sessions(paths["closed_csv"])
+        df = df[df["SessionID"].astype(str) != str(sel_sess)]
+        df.to_csv(paths["closed_csv"], index=False)
+        st.experimental_rerun()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Prescribed movements for the selected session
+# ──────────────────────────────────────────────────────────────────────────────
+target_sid_norm = str(sel_sess).strip().lower()
+movs_sid_norm = movs.get("SessionID", pd.Series([""]*len(movs))).astype(str).str.strip().str.lower()
+presc = movs[movs_sid_norm == target_sid_norm].copy()
+
+if presc.empty:
+    st.warning("No prescribed work found for this session.")
+    # Still show historical logs below for context
+    logs_df = get_session_logs(paths["log_csv"], sel_sess)
+    st.markdown("### Logged entries for this session")
+    if logs_df.empty:
+        st.info("No logs yet for this session.")
+    else:
+        view_cols = [
+            "Timestamp","MovementID",
+            "Sets_Prescribed","Reps_Prescribed","Load_Prescribed","Pct1RM_Prescribed",
+            "Sets_Actual","Reps_Actual","Load_Actual","RPE","Notes"
+        ]
+        existing = [c for c in view_cols if c in logs_df.columns]
+        st.dataframe(ensure_arrow_compat(logs_df[existing]), use_container_width=True)
+    st.stop()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Enrich with Movement Library names/units (needed before compute)
+# ──────────────────────────────────────────────────────────────────────────────
+if not lib.empty and "MovementID" in lib.columns:
+    lib_cols = ["MovementID"]
+    if "Name" in lib.columns: lib_cols.append("Name")
+    if "Unit" in lib.columns: lib_cols.append("Unit")
+    lib_slim = lib[lib_cols].drop_duplicates(subset="MovementID")
+    presc = presc.merge(lib_slim, on="MovementID", how="left", suffixes=("", "_Lib"))
+    presc["MovementName"] = presc.get("Name", presc.get("MovName", presc["MovementID"]))
+    if "Unit" in presc.columns and "Unit_Lib" in presc.columns:
+        presc["Unit"] = presc["Unit"].fillna(presc["Unit_Lib"])
+else:
+    presc["MovementName"] = presc.get("MovName", presc["MovementID"])
+
+# Unit fallback (so compute knows if the row is load-bearing)
+if "Unit" not in presc.columns:
+    presc["Unit"] = default_unit
+else:
+    presc["Unit"] = presc["Unit"].fillna(default_unit).replace("", default_unit)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Compute loads from MovementLibrary + OneRMs (single source)
+# ──────────────────────────────────────────────────────────────────────────────
+one_rm_lookup = build_one_rm_lookup(one_rms_df) if isinstance(one_rms_df, pd.DataFrame) else {}
+presc = compute_prescribed_loads(
+    session_df=presc,
+    movement_library=lib if not lib.empty else pd.DataFrame(columns=["MovementID"]),
+    prs_df_or_lookup=one_rm_lookup,  # <— ONLY source used
+    settings=cfg,
+)
+
+# Normalize %1RM & Load columns for downstream logging/display
+presc["Pct1RM_Prescribed"] = pick_series(presc, ["%1RM", "Percent1RM", "Pct1RM"])
+if "PercentUsed" in presc.columns:
+    # Fill blanks from compute result (fraction form)
+    presc["Pct1RM_Prescribed"] = presc["Pct1RM_Prescribed"].where(
+        presc["Pct1RM_Prescribed"].notna(), presc["PercentUsed"]
+    )
+
+# Prefer compute's FinalLoad/CalcLoad if present
+presc["Load_Prescribed"] = pick_series(presc, ["FinalLoad", "CalcLoad", "Final Load", "Calculated Load", "Load"])
+# For UI, use the already-rounded FinalLoad when available
+presc["Load_Prescribed_Rounded"] = presc["Load_Prescribed"]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Diagnostics (Session-level)
+# ──────────────────────────────────────────────────────────────────────────────
+with st.expander("🔎 Diagnostics – Session data health", expanded=False):
+    st.write("**SessionMovements columns (all):**", list(movs.columns))
+    st.write("**SessionMovements columns (this session):**", list(presc.columns))
+
+    calc_candidates = ["FinalLoad", "Final Load", "CalcLoad", "Calculated Load", "Prescribed Load", "TargetLoad", "Target Load", "Load"]
+    calc_series = pick_series(presc, calc_candidates)
+    n_rows = len(presc)
+    n_calc_blank = int(calc_series.isna().sum() + (calc_series == "").sum())
+    st.write(f"**Load-like column candidates:** {calc_candidates}")
+    st.write(f"**Rows in session:** {n_rows}  |  **Load blanks:** {n_calc_blank}")
+
+    pct_candidates = ["%1RM", "Percent1RM", "Pct1RM"]
+    pct_series = pick_series(presc, pct_candidates)
+    n_pct_present = int(pct_series.notna().sum())
+    st.write(f"**%1RM-like column candidates:** {pct_candidates}  |  **%1RM present rows:** {n_pct_present}")
+
+    if not lib.empty and "MovementID" in lib.columns:
+        known_mids = set(lib["MovementID"].astype(str))
+        missing_in_lib = presc[~presc["MovementID"].astype(str).isin(known_mids)]
+        if not missing_in_lib.empty:
+            st.error(f"{len(missing_in_lib)} movements in this session are not found in MovementLibrary.")
+            st.dataframe(ensure_arrow_compat(missing_in_lib[["MovementID"]].drop_duplicates()),
+                         use_container_width=True)
+        else:
+            st.success("All MovementIDs in this session exist in MovementLibrary.")
+    else:
+        st.info("MovementLibrary sheet missing/empty, skipping MovementID coverage check.")
+
+    if this_closed and not get_session_logs(paths["log_csv"], sel_sess).empty:
+        st.info("This session is currently closed but has existing logs. That’s OK (historical), just a heads-up.")
+
+# Inline coverage guard
+if not lib.empty and "MovementID" in lib.columns:
+    known_mids = set(lib["MovementID"].astype(str))
+    _missing = presc[~presc["MovementID"].astype(str).isin(known_mids)]
+    if not _missing.empty:
+        st.error(
+            f"{_missing['MovementID'].nunique()} MovementID(s) in this session "
+            "are not found in MovementLibrary. Please fix before logging."
+        )
+        st.dataframe(
+            ensure_arrow_compat(_missing[["MovementID"]].drop_duplicates().reset_index(drop=True)),
+            use_container_width=True
+        )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 📋 Prescribed Work (display)
+# ──────────────────────────────────────────────────────────────────────────────
+st.subheader("📋 Prescribed Work")
+display = presc.copy()
+for dup in ["Load", "%1RM"]:
+    if dup in display.columns:
+        display = display.drop(columns=[dup])
+display = display.rename(columns={
+    "Load_Prescribed_Rounded": "Load",
+    "Pct1RM_Prescribed": "%1RM",
+})
+cols_to_show = [c for c in [
+    "MovementID", "MovementName", "Sets", "Reps",
+    "CalcLoad", "FinalLoad", "Load", "%1RM", "Unit", "LoadNote"
+] if c in display.columns]
+st.dataframe(ensure_arrow_compat(display[cols_to_show].reset_index(drop=True)), use_container_width=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ✍️ Log Actuals UI (single "Submit session" button)
+# ──────────────────────────────────────────────────────────────────────────────
+st.subheader("✍️ Log Actuals")
+logs_df = get_session_logs(paths["log_csv"], sel_sess)
+
+# ✅ Stabilize order so the index is deterministic
+presc = presc.reset_index(drop=True)
+
+if this_closed:
+    st.info("This session is closed. Logging inputs are disabled. Reopen above if needed.")
+else:
+    with st.form(f"log_form_{sel_sess}", clear_on_submit=False):
+        entries = []
+
+        _hist_df = _load_logs_minimal(paths["log_csv"])
+
+        for i, (_, rx) in enumerate(presc.iterrows(), start=1):
+            mv_id = rx["MovementID"]
+            mv_name = rx.get("MovementName", mv_id)
+
+            sets_p = safe_int(rx.get("Sets"), 0)
+
+            cycles_p, complex_pat = parse_complex_reps(rx.get("Reps"))
+            if complex_pat and cycles_p is None:
+                reps_p = 1
+            else:
+                reps_p = cycles_p if cycles_p is not None else safe_int(rx.get("Reps"), 0)
+
+            # Use computed FinalLoad as the prescribed default
+            load_p = safe_float(rx.get("FinalLoad"), None)
+            # If missing, fall back to the (possibly) pre-existing rounded
+            if load_p is None:
+                load_p = safe_float(rx.get("Load_Prescribed_Rounded"), None)
+
+            # Use session-entered % if present, else the PercentUsed from compute
+            pct_p = rx.get("Pct1RM_Prescribed", rx.get("PercentUsed", None))
+            unit   = (rx.get("Unit") or default_unit) if "Unit" in rx else default_unit
+
+            with st.expander(f"{mv_id} — {mv_name}", expanded=False):
+                c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 2])
+
+                sets_a = c1.number_input(
+                    "Sets (actual)",
+                    min_value=0, step=1, value=sets_p,
+                    key=f"sets_{sel_sess}_{mv_id}_{i}"
+                )
+
+                reps_label = "Reps (actual cycles)" if complex_pat else "Reps (actual)"
+                reps_a = c2.number_input(
+                    reps_label,
+                    min_value=0, step=1, value=reps_p,
+                    key=f"reps_{sel_sess}_{mv_id}_{i}"
+                )
+                if complex_pat:
+                    try:
+                        parts = [int(x) for x in complex_pat.split('+') if x.strip().isdigit()]
+                        total_parts = sum(parts) if parts else None
+                    except Exception:
+                        total_parts = None
+                    suffix = f" (per set: {total_parts} parts)" if total_parts else ""
+                    c2.caption(f"Complex: {complex_pat}{suffix}")
+
+                load_a = c3.number_input(
+                    f"Load (actual) [{unit}]",
+                    min_value=0.0,
+                    step=round_inc if round_inc > 0 else 1.0,
+                    value=float(load_p) if load_p is not None and not pd.isna(load_p) else 0.0,
+                    key=f"load_{sel_sess}_{mv_id}_{i}",
+                )
+                rpe_a  = c4.slider("RPE", min_value=1, max_value=10, value=6, key=f"rpe_{sel_sess}_{mv_id}_{i}")
+                notes  = c5.text_input("Notes", value="", key=f"notes_{sel_sess}_{mv_id}_{i}")
+
+                st.divider()
+                _render_last_n_logs_for_movement(_hist_df, mv_id, n=3)
+
+                entries.append({
+                    "mv_id": mv_id,
+                    "mv_name": mv_name,
+                    "sets_p": sets_p,
+                    "reps_p": reps_p,      # store cycles when complex (pattern-only defaults to 1)
+                    "load_p": load_p,
+                    "pct_p":  pct_p,
+                    "unit":   unit,
+                    "sets_a": sets_a,
+                    "reps_a": reps_a,      # user enters cycles
+                    "load_a": load_a,
+                    "rpe_a":  rpe_a,
+                    "notes":  notes,
+                })
+
+        submitted = st.form_submit_button("💾 Submit session")
+
+    if submitted:
+        if is_session_closed(paths["closed_csv"], sel_sess):
+            st.warning("This session was closed before saving. Reopen it above to add logs.")
+        else:
+            rows_to_save = []
+            for e in entries:
+                has_data = (e["sets_a"] or e["reps_a"] or e["load_a"] or (e["notes"] and e["notes"].strip()))
+                if not has_data:
+                    continue
+
+                actual_value = float(e["load_a"])
+                if round_inc > 0:
+                    actual_value = round_to_increment(actual_value, round_inc)
+
+                rows_to_save.append({
+                    "LogID": mk_log_id(),
+                    "SessionID": sel_sess,
+                    "MovementID": e["mv_id"],
+                    "Sets_Prescribed": e["sets_p"] if e["sets_p"] else pd.NA,
+                    "Reps_Prescribed": e["reps_p"] if e["reps_p"] else pd.NA,
+                    "Load_Prescribed": e["load_p"] if e["load_p"] is not None and not pd.isna(e["load_p"]) else pd.NA,
+                    "Pct1RM_Prescribed": e["pct_p"] if e["pct_p"] is not None and not pd.isna(e["pct_p"]) else pd.NA,
+                    "Sets_Actual": int(e["sets_a"]),
+                    "Reps_Actual": int(e["reps_a"]),
+                    "Load_Actual": actual_value,
+                    "RPE": int(e["rpe_a"]),
+                    "Notes": e["notes"],
+                    "Timestamp": datetime.now().isoformat(timespec="seconds"),
+                })
+
+            if not rows_to_save:
+                st.info("Nothing to save — enter at least one set/reps/load or a note.")
+            else:
+                for row in rows_to_save:
+                    append_log_row(paths["log_csv"], row)
+                st.success(f"Saved {len(rows_to_save)} entr{'y' if len(rows_to_save)==1 else 'ies'} ✅")
+                logs_df = get_session_logs(paths["log_csv"], sel_sess)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Logged entries table
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### Logged entries for this session")
+logs_df = get_session_logs(paths["log_csv"], sel_sess)
+if logs_df.empty:
+    st.info("No logs yet for this session.")
+else:
+    view_cols = [
+        "Timestamp", "MovementID",
+        "Sets_Prescribed", "Reps_Prescribed", "Load_Prescribed", "Pct1RM_Prescribed",
+        "Sets_Actual", "Reps_Actual", "Load_Actual", "RPE", "Notes"
+    ]
+    existing = [c for c in view_cols if c in logs_df.columns]
+    st.dataframe(ensure_arrow_compat(logs_df[existing]), use_container_width=True)
+
+st.caption("The app **never overwrites** your planning sheets. Actuals are appended to a CSV next to your Excel file.")

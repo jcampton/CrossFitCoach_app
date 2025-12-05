@@ -1,0 +1,44 @@
+garmin_product,manufacturer,number,serial_number,time_created,type,unknown_6,software_version,timestamp,version,unknown_0,unknown_1,unknown_2,activity_type,cycles_to_calories,cycles_to_distance,local_timestamp,resting_metabolic_rate,unknown_7,unknown_8,active_calories,active_time,cycles,distance,duration_min,steps,unknown_35,unknown_36,unknown_37,unknown_38,unknown_253,enabled,data,data16,event,event_type,stress_level_time,stress_level_value,unknown_3,unknown_4,heart_rate,timestamp_16,current_activity_type_intensity,intensity,source_file,fit_type
+3289.0,garmin,72.0,3394818363.0,2023-07-01 05:08:00,monitoring_b,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+3289.0,garmin,,3394818363.0,,,,26.0,2023-07-01 05:08:00,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,6.0,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,0.0,0.0,200,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:08:00,,,,,"(6, 1)","(0.0542, 0.1708)","(1.7016, 2.5524)",2023-07-01 15:08:00,2163.0,"(6400, 6400)",,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(179, 104, 2, 63, 0, 2, 0, 6, 176, 0, 0, 13, 96, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(179, 104, 2, 63, 0, 3, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:08:00,,,,,generic,,,,,,,19.0,333.0,0.0,0.0,908.0,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:08:00,,,,,walking,,,,,,,433.0,5722.0,,6411.2,908.0,7320.0,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:08:00,,,,,running,,,,,,,464.0,2610.0,,6751.34,908.0,6840.0,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:08:00,,,,,,,,,,,,,,,,,,270379.0,232260.0,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:08:00,,,,,,,,,,,,,,,,,,,,3.0,57.0,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,46.0,50.0,,,,,,,,,,,,,,,,,,,1057122480.0,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,1057122480.0,on,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:08:03,,,,,,,,,,,,,,,,,,,,,,,,200.0,200.0,78.0,marker,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,101,,,,,,,,,,,,,,,,,,,,,,,,2023-07-01 05:09:00,-1.0,29.0,1.0,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,-100.0,,,,,,,,,,,,,,,,,,,,1057122540.0,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,95.0,26860.0,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(248, 104, 2, 63, 0, 3, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(248, 104, 2, 63, 0, 3, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(252, 104, 2, 63, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:09:00,,,,,sedentary,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"(136,)",4.0,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,1057122540.0,on,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:09:00,,,,,generic,,,,,,,19.0,333.0,0.0,0.0,909.0,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:09:00,,,,,walking,,,,,,,433.0,5722.0,,6411.2,909.0,7320.0,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:09:00,,,,,running,,,,,,,464.0,2610.0,,6751.34,909.0,6840.0,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:09:00,,,,,,,,,,,,,,,,,,270379.0,232260.0,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,2023-07-01 05:09:00,,,,,,,,,,,,,,,,,,,,3.0,57.0,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,46.0,50.0,,,,,,,,,,,,,,,,,,,1057122540.0,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(19, 105, 2, 63, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS
+,,,,,,,,,,,,"(19, 105, 2, 63, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080365903_WELLNESS.fit,WELLNESS

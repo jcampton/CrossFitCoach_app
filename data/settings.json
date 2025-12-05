@@ -1,0 +1,19 @@
+{
+  "data_path": "data/CrossFit_AI_Coach_Baseline.xlsx",
+  "sheets": {
+    "programs": "Programs",
+    "sessions": "Sessions",
+    "session_movements": "SessionMovements",
+    "movement_library": "MovementLibrary",
+    "one_rms": "OneRMs"
+  },
+  "log_csv": "SessionsMovements_Log.csv",
+  "program_active_statuses": ["ACTIVE"],
+  "display": {
+    "round_increment": 2.5,
+    "default_unit": "kg"
+  },
+  "data": {
+    "workbook_path": "data/CrossFit_AI_Coach_Baseline.xlsx"
+  }
+}

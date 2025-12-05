@@ -1,0 +1,14 @@
+garmin_product,manufacturer,number,serial_number,time_created,type,software_version,unknown_2,unknown_3,unknown_4,product,timestamp,unknown_0,unknown_1,unknown_253,unknown_10,unknown_11,unknown_12,unknown_13,unknown_14,unknown_5,unknown_6,unknown_8,unknown_9,unknown_7,source_file,fit_type
+3289.0,garmin,1929.0,3394818363.0,2023-07-01 02:00:04,44.0,,,,,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,2600.0,fenix 6,1.0,1.0,,,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,3394818363.0,,,26.0,,,,3289.0,2023-07-01 02:00:04,,,,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,,,,,,1057147204.0,0.0,1057111204.0,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,,,,,,,61603840.0,1057024803.0,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,540,,,,,1057122388.0,1006847.0,,1048704.0,1006847.0,1.0,0.0,179.0,1.0,0.0,0.0,1.0,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,0,249.0,0.0,,,1389.0,1057122389.0,,,,,,,5.0,,,,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,0,334.0,734.0,,,38745076.0,80232342.0,1057122389.0,,,,,,400.0,801.0,400.0,4.0,133.0,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,5,2.0,,,,1.0,0.0,1057122389.0,,4.0,,,,,,,0.0,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,1,191.0,413.0,,,16.0,1.0,1057122389.0,,,,,,4.0,,,,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,,1057028215.0,900.0,,,1057122389.0,,1057122389.0,100.0,920.0,50.0,980.0,,900.0,0.0,2.0,0.0,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,2780,6191.0,13516.0,,,1057158389.0,1314.0,1057122389.0,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
+,,,,,,,4219800,10549500.0,0.0,,,0.0,0.0,1057122391.0,,,,,,,,,,,C:\CrossFitCoach\fit_files\197080215267_METRICS.fit,METRICS
