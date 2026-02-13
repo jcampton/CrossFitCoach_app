@@ -1,4 +1,3 @@
-#depoly test
 # 01_Athlete.py
 # Athlete-facing Streamlit UI to select Program & Session, view prescribed work, and log actuals (append-only).
 # Guard rails: never crash on missing data; append-only CSV; tolerant Program/Session linking; unit + rounding fallbacks.
@@ -24,8 +23,6 @@ from coach_io import (
     pick_series,
     round_to_increment,
     ensure_arrow_compat,   # centralized Arrow-safe display helper
-    # shared load computation + OneRM lookup
-    compute_prescribed_loads,
     build_one_rm_lookup,
 )
 
@@ -351,27 +348,19 @@ ensure_closed_csv(paths["closed_csv"])
 
 # Sidebar: quick settings + display preferences
 with st.sidebar:
-    st.subheader("Settings")
-    st.code(json.dumps({
-        "excel_path": str(paths["excel"]),
-        "log_csv": str(paths["log_csv"]),
-        "closed_csv": str(paths["closed_csv"]),
-        "sheets": cfg.get("sheets", {})
-    }, indent=2), language="json")
-    st.caption("Edit data/settings.json to change the Excel path / sheet names. "
-               "The log and closed-session CSVs live next to the workbook.")
+#    st.subheader("Settings")
+#    st.code(json.dumps({
+#        "excel_path": str(paths["excel"]),
+#        "log_csv": str(paths["log_csv"]),
+#        "closed_csv": str(paths["closed_csv"]),
+#        "sheets": cfg.get("sheets", {})
+#    }, indent=2), language="json")
+#    st.caption("Edit data/settings.json to change the Excel path / sheet names. "
+#               "The log and closed-session CSVs live next to the workbook.")
 
     disp_cfg = cfg.get("display", {})
     round_inc = disp_cfg.get("round_increment", 2.5)
     default_unit = disp_cfg.get("default_unit", "kg")
-
-    # Keep: hide completed toggle
-    hide_completed = st.checkbox(
-        "Hide completed sessions",
-        value=st.session_state.get("hide_completed", True),
-        key="hide_completed",
-        help="Hide sessions that already have at least one log."
-    )
 
 # Sanitize display options
 try:
@@ -428,11 +417,14 @@ ACTIVE_STATUSES = {s.upper().strip() for s in cfg.get("program_active_statuses",
 if 'show_active_programs_only' not in st.session_state:
     st.session_state['show_active_programs_only'] = True  # default ON
 
+st.caption("Filters") #Title for filters
+
 show_active_only = st.checkbox(
     "Show active programs only",
     value=st.session_state['show_active_programs_only'],
     help=f"Active when Programs[Status] is in {sorted(ACTIVE_STATUSES)}"
 )
+
 st.session_state['show_active_programs_only'] = show_active_only
 
 progs_view = progs.copy()
@@ -448,6 +440,13 @@ if show_active_only:
     else:
         st.info("Programs sheet has no 'Status' column. Showing all programs.")
         progs_view = progs.copy()
+
+hide_completed = st.checkbox(
+    "Hide completed sessions",
+    value=st.session_state.get("hide_completed", True),
+    key="hide_completed",
+    help="Hide sessions that already have at least one log."
+)
 
 # Program dropdown (plain label; badge below)
 progs["Label"] = progs.get("Name", progs.get("ProgramCode", progs.get("ProgramID", ""))).astype(str)
@@ -626,29 +625,92 @@ if "Unit" not in presc.columns:
 else:
     presc["Unit"] = presc["Unit"].fillna(default_unit).replace("", default_unit)
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Compute loads from MovementLibrary + OneRMs (single source)
+# Compute prescribed loads (manual Load wins; otherwise %1RM × 1RM lookup)
 # ──────────────────────────────────────────────────────────────────────────────
 one_rm_lookup = build_one_rm_lookup(one_rms_df) if isinstance(one_rms_df, pd.DataFrame) else {}
-presc = compute_prescribed_loads(
-    session_df=presc,
-    movement_library=lib if not lib.empty else pd.DataFrame(columns=["MovementID"]),
-    prs_df_or_lookup=one_rm_lookup,  # <— ONLY source used
-    settings=cfg,
-)
 
-# Normalize %1RM & Load columns for downstream logging/display
-presc["Pct1RM_Prescribed"] = pick_series(presc, ["%1RM", "Percent1RM", "Pct1RM"])
-if "PercentUsed" in presc.columns:
-    # Fill blanks from compute result (fraction form)
-    presc["Pct1RM_Prescribed"] = presc["Pct1RM_Prescribed"].where(
-        presc["Pct1RM_Prescribed"].notna(), presc["PercentUsed"]
-    )
+def _normalize_pct(p):
+    """
+    Accepts 0.65, 65, or '65%'. Returns fraction (0.65) or None.
+    """
+    if p is None:
+        return None
+    try:
+        if pd.isna(p):
+            return None
+    except Exception:
+        pass
 
-# Prefer compute's FinalLoad/CalcLoad if present
-presc["Load_Prescribed"] = pick_series(presc, ["FinalLoad", "CalcLoad", "Final Load", "Calculated Load", "Load"])
-# For UI, use the already-rounded FinalLoad when available
-presc["Load_Prescribed_Rounded"] = presc["Load_Prescribed"]
+    s = str(p).strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("%"):
+            v = float(s[:-1]) / 100.0
+        else:
+            v = float(s)
+            if v > 1.5:   # treat 65 as 65%
+                v = v / 100.0
+        return v if v >= 0 else None
+    except Exception:
+        return None
+
+# Pull %1RM and Load from the session movements table (your “programming CSV/sheet”)
+_pct_raw = pick_series(presc, ["%1RM", "Percent1RM", "Pct1RM"])
+_load_raw = pick_series(presc, ["Load", "Prescribed Load", "Target Load"])
+
+# Normalize %1RM → fraction for logging + compute
+presc["Pct1RM_Prescribed"] = _pct_raw.apply(_normalize_pct)
+
+# Compute per-row prescribed load:
+# 1) If manual Load > 0 → use it
+# 2) Else if %1RM present and 1RM exists → compute
+# 3) Else → blank
+def _resolve_load(row):
+    # Manual load wins
+    try:
+        manual = row.get("_ManualLoad", None)
+        if manual is not None and pd.notna(manual) and float(manual) > 0:
+            return float(manual), "Manual Load"
+    except Exception:
+        pass
+
+    pct = row.get("Pct1RM_Prescribed", None)
+    if pct is None or (isinstance(pct, float) and pd.isna(pct)):
+        return None, "No %1RM"
+
+    mv = str(row.get("MovementID") or "").strip()
+    base_1rm = one_rm_lookup.get(mv, None)
+    if base_1rm is None or pd.isna(base_1rm) or float(base_1rm) <= 0:
+        return None, "No 1RM"
+
+    try:
+        return float(base_1rm) * float(pct), f"%1RM × 1RM ({mv})"
+    except Exception:
+        return None, "Bad inputs"
+
+# Coerce manual load numeric (so comparisons work)
+presc["_ManualLoad"] = pd.to_numeric(_load_raw, errors="coerce")
+
+resolved = presc.apply(_resolve_load, axis=1, result_type="expand")
+presc["Load_Prescribed"] = resolved[0]
+presc["Load_Source"] = resolved[1]  # optional diagnostic column (safe to keep or remove)
+
+# Round for UI / prefill (only if we have a number)
+def _round_if(x):
+    try:
+        if x is None or pd.isna(x):
+            return None
+        return round_to_increment(float(x), round_inc) if round_inc > 0 else float(x)
+    except Exception:
+        return None
+
+presc["Load_Prescribed_Rounded"] = presc["Load_Prescribed"].apply(_round_if)
+
+# Cleanup helper column (optional)
+presc = presc.drop(columns=["_ManualLoad"], errors="ignore")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Diagnostics (Session-level)
@@ -712,7 +774,7 @@ display = display.rename(columns={
 })
 cols_to_show = [c for c in [
     "MovementID", "MovementName", "Sets", "Reps",
-    "CalcLoad", "FinalLoad", "Load", "%1RM", "Unit", "LoadNote"
+    "Load", "Notes"
 ] if c in display.columns]
 st.dataframe(ensure_arrow_compat(display[cols_to_show].reset_index(drop=True)), use_container_width=True)
 
