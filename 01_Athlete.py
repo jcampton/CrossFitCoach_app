@@ -3,20 +3,38 @@
 # Guard rails: never crash on missing data; append-only CSV; tolerant Program/Session linking; unit + rounding fallbacks.
 # Uses OneRMs sheet as the single source of truth for load prescriptions.
 
-from __future__ import annotations
-
-import json
-import re
-import uuid
-from datetime import datetime
-from pathlib import Path
-
-import io
 import pandas as pd
 import streamlit as st
-
 from io import BytesIO
-from typing import Union, Optional
+from st_files_connection import FilesConnection
+
+def is_cloud() -> bool:
+    try:
+        return hasattr(st, "runtime") and st.runtime.exists()
+    except Exception:
+        return False
+
+@st.cache_resource(show_spinner=False)
+def _gcs_conn():
+    return st.connection("gcs", type=FilesConnection)
+
+def _strip_gcs_scheme(p: str) -> str:
+    p = str(p)
+    if p.startswith("gs://") or p.startswith("gcs://"):
+        return p.split("://", 1)[1]
+    return p
+
+def gcs_open(path: str, mode: str = "rb"):
+    return _gcs_conn().open(_strip_gcs_scheme(path), mode)
+
+def assert_gcs_configured():
+    if not is_cloud():
+        return
+    try:
+        _ = st.secrets["connections"]["gcs"]
+    except Exception:
+        st.error("Missing Streamlit Secrets: add [connections.gcs] service account fields.")
+        st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Cloud / GCS helpers (self-contained; do NOT rely on coach_io for IO)
@@ -34,19 +52,28 @@ def is_cloud() -> bool:
     except Exception:
         return False
 
+from st_files_connection import FilesConnection  # make this a hard import (no silent None)
 @st.cache_resource(show_spinner=False)
 def _gcs_conn():
-    # Streamlit docs show: conn = st.connection('gcs', type=FilesConnection)
-    # and paths like "bucket/key/file.csv" (no gs:// required). [3](https://docs.streamlit.io/develop/tutorials/databases/gcs)
-    if FilesConnection is not None:
-        return st.connection("gcs", type=FilesConnection)
-    return st.connection("gcs")
+    return st.connection("gcs", type=FilesConnection)
 
 def _strip_gcs_scheme(p: str) -> str:
     p = str(p)
     if p.startswith("gs://") or p.startswith("gcs://"):
         return p.split("://", 1)[1]
     return p
+
+def assert_gcs_configured():
+    if not is_cloud():
+        return
+    try:
+        _ = st.secrets["connections"]["gcs"]  # will KeyError if missing
+    except Exception:
+        st.error(
+            "GCS connection is not configured in Streamlit Secrets.\n\n"
+            "Add a [connections.gcs] section (service account JSON fields) in the app's Secrets."
+        )
+        st.stop()
 
 def gcs_open(path: str, mode: str = "rb"):
     """Open a GCS object using Streamlit FilesConnection."""
@@ -74,99 +101,6 @@ def _is_gcs_path(p: PathLike) -> bool:
 
 def _as_text_path(p: PathLike) -> str:
     return _strip_gcs_scheme(str(p))
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Cloud detection
-# ──────────────────────────────────────────────────────────────────────────────
-def is_cloud() -> bool:
-    try:
-        return st.runtime.exists()
-    except Exception:
-        return False
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Google Cloud Storage helper
-# ──────────────────────────────────────────────────────────────────────────────
-def gcs_open(path: str, mode: str = "r"):
-    """
-    Open a GCS object via Streamlit connection.
-    Path format: 'bucket-name/folder/file.csv'
-    """
-    conn = st.connection("gcs")
-    return conn.open(path, mode)
-
-def derive_paths(cfg: dict) -> dict:
-    """
-    Cloud-aware path resolver.
-    - In cloud: return GCS object keys (bucket/key) for Excel/log/closed.
-    - Local: return pathlib.Path objects next to workbook like before.
-    """
-    # Your single source of truth in GCS:
-    # crossfit-coach-data/data/CrossFit_AI_Coach_Baseline.xlsx
-    # crossfit-coach-data/data/SessionsMovements_Log.csv
-    # crossfit-coach-data/data/Sessions_Closed.csv
-
-    if is_cloud():
-        # Allow overrides, but default to your known-good keys.
-        excel = cfg.get("gcs_excel") or cfg.get("excel_path") or cfg.get("data_path") or "crossfit-coach-data/data/CrossFit_AI_Coach_Baseline.xlsx"
-        excel = _strip_gcs_scheme(str(excel))
-
-        # Ensure we are pointing at the GCS bucket, not local "data/..."
-        if excel.startswith("data/"):
-            excel = f"crossfit-coach-data/{excel}"
-
-        base_dir = excel.rsplit("/", 1)[0]
-
-        log_csv = cfg.get("gcs_log_csv") or cfg.get("log_csv") or "SessionsMovements_Log.csv"
-        log_csv = str(log_csv)
-        if "/" not in log_csv:
-            log_csv = f"{base_dir}/{log_csv}"
-        else:
-            log_csv = _strip_gcs_scheme(log_csv)
-
-        # Force correct pluralized filename if someone used the coach_io default:
-        if log_csv.endswith("SessionMovements_Log.csv"):
-            log_csv = log_csv.replace("SessionMovements_Log.csv", "SessionsMovements_Log.csv")
-
-        closed_csv = cfg.get("gcs_closed_csv") or cfg.get("closed_csv") or "Sessions_Closed.csv"
-        closed_csv = str(closed_csv)
-        if "/" not in closed_csv:
-            closed_csv = f"{base_dir}/{closed_csv}"
-        else:
-            closed_csv = _strip_gcs_scheme(closed_csv)
-
-        return {"excel": excel, "log_csv": log_csv, "closed_csv": closed_csv}
-
-    # Local mode (previous behavior)
-    from pathlib import Path
-    excel = cfg.get("data_path") or cfg.get("excel_path")
-    if not excel:
-        raise ValueError("settings.json needs 'excel_path' (or 'data_path').")
-    base = Path(str(excel).replace("\\", "/")).expanduser().resolve()
-
-    def _resolve_next_to_base(value, default_name):
-        if not value:
-            return base.with_name(default_name)
-        p = Path(str(value).replace("\\", "/"))
-        if not p.is_absolute() and (p.parent == Path("") or str(p).find("/") < 0):
-            return base.with_name(p.name)
-        return p
-
-    log_csv = _resolve_next_to_base(cfg.get("log_csv"), "SessionsMovements_Log.csv")
-    closed_csv = _resolve_next_to_base(cfg.get("closed_csv"), "Sessions_Closed.csv")
-    return {"excel": base, "log_csv": log_csv, "closed_csv": closed_csv}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Reuse IO + helpers from coach_io (centralised Arrow helper)
-# ──────────────────────────────────────────────────────────────────────────────
-from coach_io import (
-    load_settings,
-    load_excel_tables,
-    pick_series,
-    round_to_increment,
-    ensure_arrow_compat,   # centralized Arrow-safe display helper
-    build_one_rm_lookup,
-)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Page config
