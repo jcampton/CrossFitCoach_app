@@ -3,20 +3,31 @@
 # Guard rails: never crash on missing data; append-only CSV; tolerant Program/Session linking; unit + rounding fallbacks.
 # Uses OneRMs sheet as the single source of truth for load prescriptions.
 
+from __future__ import annotations
+
+import io
+import json
+import re
+import uuid
+from datetime import datetime
+from pathlib import Path
+from io import BytesIO
+from typing import Union, Optional
+
 import pandas as pd
 import streamlit as st
-from io import BytesIO
 from st_files_connection import FilesConnection
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Cloud / GCS helpers (single source of truth)
+# ──────────────────────────────────────────────────────────────────────────────
+
 def is_cloud() -> bool:
+    """Best-effort check for Streamlit runtime."""
     try:
         return hasattr(st, "runtime") and st.runtime.exists()
     except Exception:
         return False
-
-@st.cache_resource(show_spinner=False)
-def _gcs_conn():
-    return st.connection("gcs", type=FilesConnection)
 
 def _strip_gcs_scheme(p: str) -> str:
     p = str(p)
@@ -24,80 +35,40 @@ def _strip_gcs_scheme(p: str) -> str:
         return p.split("://", 1)[1]
     return p
 
-def gcs_open(path: str, mode: str = "rb"):
-    return _gcs_conn().open(_strip_gcs_scheme(path), mode)
+@st.cache_resource(show_spinner=False)
+def _gcs_conn():
+    # Always bind the FilesConnection type explicitly. [1](https://environmentnswgov.sharepoint.com/sites/Home/SitePages/Home.aspx?web=1)
+    return st.connection("gcs", type=FilesConnection)
 
-def assert_gcs_configured():
+def assert_gcs_configured() -> None:
+    """Fail fast with a readable message if secrets aren't present."""
     if not is_cloud():
         return
     try:
         _ = st.secrets["connections"]["gcs"]
     except Exception:
-        st.error("Missing Streamlit Secrets: add [connections.gcs] service account fields.")
-        st.stop()
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Cloud / GCS helpers (self-contained; do NOT rely on coach_io for IO)
-# ──────────────────────────────────────────────────────────────────────────────
-
-try:
-    from st_files_connection import FilesConnection
-except Exception:
-    FilesConnection = None
-
-def is_cloud() -> bool:
-    """Best-effort check for Streamlit Community Cloud/runtime."""
-    try:
-        return hasattr(st, "runtime") and st.runtime.exists()
-    except Exception:
-        return False
-
-from st_files_connection import FilesConnection  # make this a hard import (no silent None)
-@st.cache_resource(show_spinner=False)
-def _gcs_conn():
-    return st.connection("gcs", type=FilesConnection)
-
-def _strip_gcs_scheme(p: str) -> str:
-    p = str(p)
-    if p.startswith("gs://") or p.startswith("gcs://"):
-        return p.split("://", 1)[1]
-    return p
-
-def assert_gcs_configured():
-    if not is_cloud():
-        return
-    try:
-        _ = st.secrets["connections"]["gcs"]  # will KeyError if missing
-    except Exception:
         st.error(
-            "GCS connection is not configured in Streamlit Secrets.\n\n"
-            "Add a [connections.gcs] section (service account JSON fields) in the app's Secrets."
+            "GCS secrets not found.\n\n"
+            "Add a [connections.gcs] section (service account JSON fields) in Streamlit Secrets."
         )
         st.stop()
 
 def gcs_open(path: str, mode: str = "rb"):
-    """Open a GCS object using Streamlit FilesConnection."""
+    assert_gcs_configured()
     return _gcs_conn().open(_strip_gcs_scheme(path), mode)
 
 def gcs_exists(path: str) -> bool:
+    assert_gcs_configured()
     try:
-        fs = _gcs_conn().fs
-        return fs.exists(_strip_gcs_scheme(path))
+        return _gcs_conn().fs.exists(_strip_gcs_scheme(path))
     except Exception:
-        # fallback: try read-open
         try:
             with gcs_open(path, "rb"):
                 return True
         except Exception:
             return False
 
-PathLike = Union[str, "Path"]
-
-def _is_gcs_path(p: PathLike) -> bool:
-    s = str(p)
-    return ("/" in s and not s.startswith(".")) and (
-        s.startswith("gs://") or s.startswith("gcs://") or s.startswith("crossfit-") or s.startswith("streamlit-") or s.startswith("bucket/")
-    ) or s.count("/") >= 1 and s.startswith("crossfit-coach-data/")
+PathLike = Union[str, Path]
 
 def _as_text_path(p: PathLike) -> str:
     return _strip_gcs_scheme(str(p))
