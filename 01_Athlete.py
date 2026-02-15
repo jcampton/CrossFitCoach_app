@@ -15,6 +15,26 @@ import pandas as pd
 import streamlit as st
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Cloud detection
+# ──────────────────────────────────────────────────────────────────────────────
+def is_cloud() -> bool:
+    try:
+        return st.runtime.exists()
+    except Exception:
+        return False
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Google Cloud Storage helper
+# ──────────────────────────────────────────────────────────────────────────────
+def gcs_open(path: str, mode: str = "r"):
+    """
+    Open a GCS object via Streamlit connection.
+    Path format: 'bucket-name/folder/file.csv'
+    """
+    conn = st.connection("gcs")
+    return conn.open(path, mode)
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Reuse IO + helpers from coach_io (centralised Arrow helper)
 # ──────────────────────────────────────────────────────────────────────────────
 from coach_io import (
@@ -32,6 +52,12 @@ try:
 except Exception:
     # Fallback: robust local version (handles Windows backslashes & relative names)
     def derive_paths(cfg: dict) -> dict:
+        if is_cloud():
+            return {
+                "excel": "crossfit-coach-data/data/CrossFit_AI_Coach_Baseline.xlsx",
+                "log_csv": "crossfit-coach-data/data/SessionsMovements_Log.csv",
+                "closed_csv": "crossfit-coach-data/data/Sessions_Closed.csv",
+            } 
         excel = cfg.get("data_path") or cfg.get("excel_path")
         if not excel:
             raise ValueError("settings.json needs 'excel_path' (or 'data_path').")
@@ -108,25 +134,28 @@ def ensure_log_csv(path: Path) -> None:
             pass
         pd.DataFrame(columns=_LOG_COLS).to_csv(p, index=False)
 
-def append_log_row(path: Path, row: dict) -> None:
-    """Append one row to the log CSV (schema-safe)."""
-    ensure_log_csv(path)
+def append_log_row(path, row: dict) -> None:
     safe = {col: row.get(col, pd.NA) for col in _LOG_COLS}
-    pd.DataFrame([safe], columns=_LOG_COLS).to_csv(path, mode="a", header=False, index=False)
+    df = pd.DataFrame([safe], columns=_LOG_COLS)
 
-def read_csv_typed(path: Path, usecols: list[str] | None = None) -> pd.DataFrame:
-    """Read CSV with safe dtypes (only for columns present)."""
-    ensure_log_csv(path)
+    if is_cloud():
+        with gcs_open(path, "a") as f:
+            # write header only if file is empty
+            df.to_csv(f, header=f.tell() == 0, index=False)
+    else:
+        p = Path(path)
+        ensure_log_csv(p)
+        df.to_csv(p, mode="a", header=False, index=False)
+
+def read_csv_typed(path, usecols=None) -> pd.DataFrame:
     try:
-        # Only specify dtypes for the columns we are reading (and that exist in the dtype map)
-        if usecols is None:
-            dtype = {k: v for k, v in LOG_DTYPE_MAP.items() if v != "datetime64[ns]"}
+        if is_cloud():
+            with gcs_open(path, "r") as f:
+                return pd.read_csv(f, usecols=usecols)
         else:
-            dtype = {k: v for k, v in LOG_DTYPE_MAP.items() if k in usecols and v != "datetime64[ns]"}
-        df = pd.read_csv(path, usecols=usecols, dtype=dtype)
+            return pd.read_csv(path, usecols=usecols)
     except Exception:
-        df = pd.DataFrame(columns=usecols or _LOG_COLS)
-    return df
+        return pd.DataFrame(columns=usecols or _LOG_COLS)
 
 def get_session_logs(path: Path, session_id: str) -> pd.DataFrame:
     """All log rows for a SessionID (sorted by Timestamp if present)."""
