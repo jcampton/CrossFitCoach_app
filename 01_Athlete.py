@@ -15,6 +15,66 @@ import io
 import pandas as pd
 import streamlit as st
 
+from io import BytesIO
+from typing import Union, Optional
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cloud / GCS helpers (self-contained; do NOT rely on coach_io for IO)
+# ──────────────────────────────────────────────────────────────────────────────
+
+try:
+    from st_files_connection import FilesConnection
+except Exception:
+    FilesConnection = None
+
+def is_cloud() -> bool:
+    """Best-effort check for Streamlit Community Cloud/runtime."""
+    try:
+        return hasattr(st, "runtime") and st.runtime.exists()
+    except Exception:
+        return False
+
+@st.cache_resource(show_spinner=False)
+def _gcs_conn():
+    # Streamlit docs show: conn = st.connection('gcs', type=FilesConnection)
+    # and paths like "bucket/key/file.csv" (no gs:// required). [3](https://docs.streamlit.io/develop/tutorials/databases/gcs)
+    if FilesConnection is not None:
+        return st.connection("gcs", type=FilesConnection)
+    return st.connection("gcs")
+
+def _strip_gcs_scheme(p: str) -> str:
+    p = str(p)
+    if p.startswith("gs://") or p.startswith("gcs://"):
+        return p.split("://", 1)[1]
+    return p
+
+def gcs_open(path: str, mode: str = "rb"):
+    """Open a GCS object using Streamlit FilesConnection."""
+    return _gcs_conn().open(_strip_gcs_scheme(path), mode)
+
+def gcs_exists(path: str) -> bool:
+    try:
+        fs = _gcs_conn().fs
+        return fs.exists(_strip_gcs_scheme(path))
+    except Exception:
+        # fallback: try read-open
+        try:
+            with gcs_open(path, "rb"):
+                return True
+        except Exception:
+            return False
+
+PathLike = Union[str, "Path"]
+
+def _is_gcs_path(p: PathLike) -> bool:
+    s = str(p)
+    return ("/" in s and not s.startswith(".")) and (
+        s.startswith("gs://") or s.startswith("gcs://") or s.startswith("crossfit-") or s.startswith("streamlit-") or s.startswith("bucket/")
+    ) or s.count("/") >= 1 and s.startswith("crossfit-coach-data/")
+
+def _as_text_path(p: PathLike) -> str:
+    return _strip_gcs_scheme(str(p))
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Cloud detection
 # ──────────────────────────────────────────────────────────────────────────────
@@ -35,6 +95,67 @@ def gcs_open(path: str, mode: str = "r"):
     conn = st.connection("gcs")
     return conn.open(path, mode)
 
+def derive_paths(cfg: dict) -> dict:
+    """
+    Cloud-aware path resolver.
+    - In cloud: return GCS object keys (bucket/key) for Excel/log/closed.
+    - Local: return pathlib.Path objects next to workbook like before.
+    """
+    # Your single source of truth in GCS:
+    # crossfit-coach-data/data/CrossFit_AI_Coach_Baseline.xlsx
+    # crossfit-coach-data/data/SessionsMovements_Log.csv
+    # crossfit-coach-data/data/Sessions_Closed.csv
+
+    if is_cloud():
+        # Allow overrides, but default to your known-good keys.
+        excel = cfg.get("gcs_excel") or cfg.get("excel_path") or cfg.get("data_path") or "crossfit-coach-data/data/CrossFit_AI_Coach_Baseline.xlsx"
+        excel = _strip_gcs_scheme(str(excel))
+
+        # Ensure we are pointing at the GCS bucket, not local "data/..."
+        if excel.startswith("data/"):
+            excel = f"crossfit-coach-data/{excel}"
+
+        base_dir = excel.rsplit("/", 1)[0]
+
+        log_csv = cfg.get("gcs_log_csv") or cfg.get("log_csv") or "SessionsMovements_Log.csv"
+        log_csv = str(log_csv)
+        if "/" not in log_csv:
+            log_csv = f"{base_dir}/{log_csv}"
+        else:
+            log_csv = _strip_gcs_scheme(log_csv)
+
+        # Force correct pluralized filename if someone used the coach_io default:
+        if log_csv.endswith("SessionMovements_Log.csv"):
+            log_csv = log_csv.replace("SessionMovements_Log.csv", "SessionsMovements_Log.csv")
+
+        closed_csv = cfg.get("gcs_closed_csv") or cfg.get("closed_csv") or "Sessions_Closed.csv"
+        closed_csv = str(closed_csv)
+        if "/" not in closed_csv:
+            closed_csv = f"{base_dir}/{closed_csv}"
+        else:
+            closed_csv = _strip_gcs_scheme(closed_csv)
+
+        return {"excel": excel, "log_csv": log_csv, "closed_csv": closed_csv}
+
+    # Local mode (previous behavior)
+    from pathlib import Path
+    excel = cfg.get("data_path") or cfg.get("excel_path")
+    if not excel:
+        raise ValueError("settings.json needs 'excel_path' (or 'data_path').")
+    base = Path(str(excel).replace("\\", "/")).expanduser().resolve()
+
+    def _resolve_next_to_base(value, default_name):
+        if not value:
+            return base.with_name(default_name)
+        p = Path(str(value).replace("\\", "/"))
+        if not p.is_absolute() and (p.parent == Path("") or str(p).find("/") < 0):
+            return base.with_name(p.name)
+        return p
+
+    log_csv = _resolve_next_to_base(cfg.get("log_csv"), "SessionsMovements_Log.csv")
+    closed_csv = _resolve_next_to_base(cfg.get("closed_csv"), "Sessions_Closed.csv")
+    return {"excel": base, "log_csv": log_csv, "closed_csv": closed_csv}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Reuse IO + helpers from coach_io (centralised Arrow helper)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -46,45 +167,6 @@ from coach_io import (
     ensure_arrow_compat,   # centralized Arrow-safe display helper
     build_one_rm_lookup,
 )
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Paths (force GCS when on Streamlit Cloud)
-# ──────────────────────────────────────────────────────────────────────────────
-try:
-    from coach_io import derive_paths as _derive_paths_local  # type: ignore
-except Exception:
-    _derive_paths_local = None
-
-def derive_paths(cfg: dict) -> dict:
-    # Cloud → always use GCS object paths (NO gs:// prefix)
-    if is_cloud():
-        return {
-            "excel": "crossfit-coach-data/data/CrossFit_AI_Coach_Baseline.xlsx",
-            "log_csv": "crossfit-coach-data/data/SessionsMovements_Log.csv",
-            "closed_csv": "crossfit-coach-data/data/Sessions_Closed.csv",
-        }
-
-    # Local → use coach_io derive_paths if available, else fallback
-    if _derive_paths_local is not None:
-        return _derive_paths_local(cfg)
-
-    # Fallback local logic (your previous code)
-    excel = cfg.get("data_path") or cfg.get("excel_path")
-    if not excel:
-        raise ValueError("settings.json needs 'excel_path' (or 'data_path').")
-    base = Path(str(excel).replace("\\", "/")).resolve()
-
-    def _resolve_next_to_base(value, default_name):
-        if not value:
-            return base.with_name(default_name)
-        p = Path(str(value).replace("\\", "/"))
-        if not p.is_absolute() and (p.parent == Path("") or str(p).find("/") < 0):
-            return base.with_name(p.name)
-        return p
-
-    log_csv    = _resolve_next_to_base(cfg.get("log_csv"),    "SessionsMovements_Log.csv")
-    closed_csv = _resolve_next_to_base(cfg.get("closed_csv"), "Sessions_Closed.csv")
-    return {"excel": base, "log_csv": log_csv, "closed_csv": closed_csv}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -108,6 +190,27 @@ def load_excel_tables_any(excel_path):
 
     # Local path
     p = Path(excel_path) if not isinstance(excel_path, Path) else excel_path
+    if not p.exists():
+        return {}
+    xls = pd.ExcelFile(p)
+    return {s: xls.parse(s) for s in xls.sheet_names}
+
+def load_excel_tables_cloudaware(workbook_path: PathLike) -> dict[str, pd.DataFrame]:
+    """
+    Always load the workbook from its true source:
+    - GCS: gcs_open -> BytesIO -> pd.ExcelFile
+    - Local: pd.ExcelFile(Path)
+    """
+    if is_cloud():
+        p = _as_text_path(workbook_path)
+        with gcs_open(p, "rb") as f:
+            data = f.read()
+        bio = BytesIO(data)
+        xls = pd.ExcelFile(bio)
+        return {s: xls.parse(s) for s in xls.sheet_names}
+
+    from pathlib import Path
+    p = Path(workbook_path)
     if not p.exists():
         return {}
     xls = pd.ExcelFile(p)
@@ -143,48 +246,62 @@ LOG_DTYPE_MAP: dict[str, str] = {
     "Timestamp": "string",  # parse to dt in code where needed
 }
 
-def ensure_log_csv(path: Path) -> None:
-    """Create the log CSV if missing; if malformed, back it up and recreate with correct header."""
+def ensure_log_csv(path: PathLike) -> None:
+    """Create log CSV if missing (cloud-safe)."""
+    cols = _LOG_COLS
+    if is_cloud():
+        p = _as_text_path(path)
+        if not gcs_exists(p):
+            with gcs_open(p, "wt") as f:
+                pd.DataFrame(columns=cols).to_csv(f, index=False)
+        return
+
+    # Local behavior (keep your stronger validation/backups if you want)
+    from pathlib import Path
     p = Path(path)
     if not p.exists():
-        pd.DataFrame(columns=_LOG_COLS).to_csv(p, index=False)
-        return
-    try:
-        head = pd.read_csv(p, nrows=5)
-        have = set(head.columns)
-        need = set(_LOG_COLS)
-        if not need.issubset(have):
-            backup = p.with_suffix(p.suffix + f".bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-            p.rename(backup)
-            pd.DataFrame(columns=_LOG_COLS).to_csv(p, index=False)
-    except Exception:
-        backup = p.with_suffix(p.suffix + f".corrupt_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        try:
-            p.rename(backup)
-        except Exception:
-            pass
-        pd.DataFrame(columns=_LOG_COLS).to_csv(p, index=False)
+        pd.DataFrame(columns=cols).to_csv(p, index=False)
 
-def append_log_row(path, row: dict) -> None:
+
+def append_log_row(path: PathLike, row: dict) -> None:
+    """Append one row to log (cloud-safe)."""
+    ensure_log_csv(path)
     safe = {col: row.get(col, pd.NA) for col in _LOG_COLS}
-    df = pd.DataFrame([safe], columns=_LOG_COLS)
+    one = pd.DataFrame([safe], columns=_LOG_COLS)
 
     if is_cloud():
-        with gcs_open(path, "a") as f:
-            # write header only if file is empty
-            df.to_csv(f, header=f.tell() == 0, index=False)
-    else:
-        p = Path(path)
-        ensure_log_csv(p)
-        df.to_csv(p, mode="a", header=False, index=False)
+        p = _as_text_path(path)
+        # Try text-append; if backend doesn’t support true append, fallback to rewrite.
+        try:
+            with gcs_open(p, "at") as f:
+                one.to_csv(f, header=False, index=False)
+            return
+        except Exception:
+            # Fallback: read + concat + rewrite (OK for small logs)
+            with gcs_open(p, "rb") as rf:
+                existing = pd.read_csv(rf)
+            combined = pd.concat([existing, one], ignore_index=True)
+            with gcs_open(p, "wt") as wf:
+                combined.to_csv(wf, index=False)
+            return
 
-def read_csv_typed(path, usecols=None) -> pd.DataFrame:
+    # Local append
+    one.to_csv(path, mode="a", header=False, index=False)
+
+def read_csv_typed(path: PathLike, usecols: Optional[list[str]] = None) -> pd.DataFrame:
+    """Read CSV with safe dtypes from local or GCS."""
+    ensure_log_csv(path)
     try:
-        if is_cloud():
-            with gcs_open(path, "r") as f:
-                return pd.read_csv(f, usecols=usecols)
+        if usecols is None:
+            dtype = {k: v for k, v in LOG_DTYPE_MAP.items() if v != "datetime64[ns]"}
         else:
-            return pd.read_csv(path, usecols=usecols)
+            dtype = {k: v for k, v in LOG_DTYPE_MAP.items() if k in usecols and v != "datetime64[ns]"}
+
+        if is_cloud():
+            with gcs_open(_as_text_path(path), "rb") as f:
+                return pd.read_csv(f, usecols=usecols, dtype=dtype)
+        else:
+            return pd.read_csv(path, usecols=usecols, dtype=dtype)
     except Exception:
         return pd.DataFrame(columns=usecols or _LOG_COLS)
 
@@ -204,39 +321,39 @@ def get_session_logs(path: Path, session_id: str) -> pd.DataFrame:
 # ──────────────────────────────────────────────────────────────────────────────
 # Closed-session registry helpers
 # ──────────────────────────────────────────────────────────────────────────────
-def ensure_closed_csv(path) -> None:
+_CLOSED_COLS = ["SessionID", "ClosedBy", "ClosedAt", "Notes"]
+
+def ensure_closed_csv(path: PathLike) -> None:
     if is_cloud():
-        # no-op; file may or may not exist in GCS
+        p = _as_text_path(path)
+        if not gcs_exists(p):
+            with gcs_open(p, "wt") as f:
+                pd.DataFrame(columns=_CLOSED_COLS).to_csv(f, index=False)
         return
+
+    from pathlib import Path
     p = Path(path)
     if not p.exists():
-        cols = ["SessionID", "ClosedBy", "ClosedAt", "Notes"]
-        pd.DataFrame(columns=cols).to_csv(p, index=False)
+        pd.DataFrame(columns=_CLOSED_COLS).to_csv(p, index=False)
 
-def load_closed_sessions(path) -> pd.DataFrame:
-    cols = ["SessionID", "ClosedBy", "ClosedAt", "Notes"]
-    try:
-        if is_cloud():
-            with gcs_open(str(path), "r") as f:
-                return pd.read_csv(f)
-        else:
-            ensure_closed_csv(path)
-            return pd.read_csv(path)
-    except Exception:
-        return pd.DataFrame(columns=cols)
-
-def save_closed_sessions(path, df: pd.DataFrame) -> None:
+def load_closed_sessions(path: PathLike) -> pd.DataFrame:
+    ensure_closed_csv(path)
     if is_cloud():
-        with gcs_open(str(path), "w") as f:
-            df.to_csv(f, index=False)
-    else:
-        df.to_csv(path, index=False)
+        with gcs_open(_as_text_path(path), "rb") as f:
+            return pd.read_csv(f)
+    return pd.read_csv(path)
 
-def is_session_closed(path, session_id: str) -> bool:
+def save_closed_sessions(path: PathLike, df: pd.DataFrame) -> None:
+    ensure_closed_csv(path)
+    if is_cloud():
+        with gcs_open(_as_text_path(path), "wt") as f:
+            df.to_csv(f, index=False)
+        return
+    df.to_csv(path, index=False)
+
+def is_session_closed(path: PathLike, session_id: str) -> bool:
     df = load_closed_sessions(path)
-    if df.empty or "SessionID" not in df.columns:
-        return False
-    return str(session_id).strip() in set(df["SessionID"].astype(str).str.strip())
+    return session_id in set(df["SessionID"].astype(str))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Small parsing helpers
@@ -402,7 +519,7 @@ def program_progress_for_selected(sel_join: str,
 cfg = load_settings("data/settings.json")
 paths = derive_paths(cfg)
 
-_raw = load_excel_tables_any(paths["excel"])
+_raw = load_excel_tables_cloudaware(paths["excel"])
 tables = {
     "programs":          _raw.get(cfg["sheets"]["programs"], pd.DataFrame()),
     "sessions":          _raw.get(cfg["sheets"]["sessions"], pd.DataFrame()),
@@ -706,7 +823,6 @@ if "Unit" not in presc.columns:
     presc["Unit"] = default_unit
 else:
     presc["Unit"] = presc["Unit"].fillna(default_unit).replace("", default_unit)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Compute prescribed loads (manual Load wins; otherwise %1RM × 1RM lookup)
