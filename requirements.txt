@@ -1,3 +1,6 @@
+
 streamlit
+st-files-connection
+gcsfs
+fsspec
 pandas
-openpyxl
