@@ -385,46 +385,94 @@ def build_completion_map(log_path: Path) -> dict[str, str]:
     last = df.groupby("SessionID")["dt"].max()
     return {sid: d.strftime("%d/%m/%Y") for sid, d in last.items()}
 
-def program_progress_for_selected(sel_join: str,
-                                  progs_df: pd.DataFrame,
-                                  sess_df: pd.DataFrame,
-                                  log_path: Path) -> dict:
-    """Return dict with completed, total, percent for the selected program."""
+def program_progress_for_selected(
+    sel_join: str,
+    progs_df: pd.DataFrame,
+    sess_df: pd.DataFrame,
+    log_path: Path,
+) -> dict:
+    """
+    Return dict with completed, total, percent for the selected program.
+    Hardening goals:
+      - Never raise NameError/UnboundLocalError
+      - Always return a dict (never None)
+      - Tolerate missing columns (_JOIN, _pname, ProgramCode, SessionID)
+    """
+
+    # ---- logs: always define log_sids ----
+    log_sids: set[str] = set()
     try:
         logs = read_csv_typed(log_path, usecols=["SessionID"])
-        log_sids = set(logs["SessionID"].astype(str))
+        if not logs.empty and "SessionID" in logs.columns:
+            log_sids = set(logs["SessionID"].dropna().astype(str))
     except Exception:
         log_sids = set()
 
-    sess_sel = sess_df[sess_df["_JOIN"] == sel_join]
-    total = int(len(sess_sel))
+    # ---- sessions subset: always define sess_sel + total ----
+    try:
+        if "_JOIN" in sess_df.columns:
+            sess_sel = sess_df[sess_df["_JOIN"] == sel_join]
+        else:
+            sess_sel = sess_df
+        total = int(len(sess_sel))
+    except Exception:
+        sess_sel = sess_df
+        total = int(len(sess_df)) if sess_df is not None else 0
 
-    if total == 0:
+    if total <= 0:
         return {"completed": 0, "total": 0, "percent": 0}
 
+    # ---- primary path: SessionID present in Sessions sheet ----
     completed = 0
-    if "SessionID" in sess_sel.columns and sess_sel["SessionID"].notna().any():
-        known = set(sess_sel["SessionID"].astype(str))
-        completed = len(log_sids & known)
-    else:
-        def _derive_progcode(row) -> str:
-            pc = row.get("ProgramCode")
-            if isinstance(pc, str) and pc.strip():
-                return pc.strip()
-            nm = str(row.get("Name", "PRG")).upper().strip()
-            s = re.sub(r'[^A-Z0-9]+', '-', nm)
-            s = re.sub(r'-+', '-', s).strip('-')
-            return s[:24] if s else "PRG"
+    try:
+        if "SessionID" in sess_sel.columns and sess_sel["SessionID"].notna().any():
+            known = set(sess_sel["SessionID"].dropna().astype(str))
+            completed = len(log_sids & known)
+        else:
+            # ---- fallback path: prefix match using derived ProgramCode ----
+            # Ensure _pname exists for mapping (don't mutate original unless needed)
+            progs_tmp = progs_df.copy()
+            if "_pname" not in progs_tmp.columns:
+                # minimal safe normalization
+                progs_tmp["_pname"] = (
+                    progs_tmp.get("Name", pd.Series([None] * len(progs_tmp)))
+                    .astype(str).str.strip().str.lower()
+                    .str.replace(r"[^a-z0-9]+", "_", regex=True)
+                    .str.replace(r"_+", "_", regex=True)
+                    .str.strip("_")
+                )
 
-        progs_df["_ProgCode_fallback"] = progs_df.apply(_derive_progcode, axis=1)
-        name_to_progcode = dict(zip(progs_df.get("_pname"), progs_df["_ProgCode_fallback"]))
-        join_to_progcode = {r["_JOIN"]: name_to_progcode.get(r["_pname"], "PRG")
-                            for _, r in progs_df[["_JOIN", "_pname"]].drop_duplicates().iterrows()}
-        prefix = f"{join_to_progcode.get(sel_join, 'PRG')}-"
-        completed = len({sid for sid in log_sids if str(sid).startswith(prefix)})
+            def _derive_progcode(row) -> str:
+                pc = row.get("ProgramCode")
+                if isinstance(pc, str) and pc.strip():
+                    return pc.strip()
+                nm = str(row.get("Name", "PRG")).upper().strip()
+                s = re.sub(r"[^A-Z0-9]+", "-", nm)
+                s = re.sub(r"-+", "-", s).strip("-")
+                return s[:24] if s else "PRG"
 
-    pct = int(round((completed / total) * 100)) if total else 0
-    return {"completed": completed, "total": total, "percent": pct}
+            progs_tmp["_ProgCode_fallback"] = progs_tmp.apply(_derive_progcode, axis=1)
+
+            # Build a JOIN->progcode mapping safely
+            join_to_progcode = {}
+            if "_JOIN" in progs_tmp.columns:
+                # If _JOIN exists, prefer it
+                for _, r in progs_tmp[["_JOIN", "_ProgCode_fallback"]].dropna().drop_duplicates().iterrows():
+                    join_to_progcode[str(r["_JOIN"])] = str(r["_ProgCode_fallback"])
+            else:
+                # Otherwise fall back to pname mapping
+                for _, r in progs_tmp[["_pname", "_ProgCode_fallback"]].dropna().drop_duplicates().iterrows():
+                    join_to_progcode[str(r["_pname"])] = str(r["_ProgCode_fallback"])
+
+            progcode = join_to_progcode.get(str(sel_join), "PRG")
+            prefix = f"{progcode}-"  # <-- prefix is ALWAYS defined here
+            completed = sum(1 for sid in log_sids if str(sid).startswith(prefix))
+    except Exception:
+        # Worst case: don’t crash the app; show 0 completed.
+        completed = 0
+
+    percent = int(round((completed / total) * 100)) if total else 0
+    return {"completed": completed, "total": total, "percent": percent}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Load settings, resolve paths, and read tables
