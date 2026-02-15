@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import io
 import pandas as pd
 import streamlit as st
 
@@ -46,41 +47,71 @@ from coach_io import (
     build_one_rm_lookup,
 )
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Paths (force GCS when on Streamlit Cloud)
+# ──────────────────────────────────────────────────────────────────────────────
 try:
-    # Prefer the shared implementation so all pages agree on where files live
-    from coach_io import derive_paths  # type: ignore
+    from coach_io import derive_paths as _derive_paths_local  # type: ignore
 except Exception:
-    # Fallback: robust local version (handles Windows backslashes & relative names)
-    def derive_paths(cfg: dict) -> dict:
-        if is_cloud():
-            return {
-                "excel": "crossfit-coach-data/data/CrossFit_AI_Coach_Baseline.xlsx",
-                "log_csv": "crossfit-coach-data/data/SessionsMovements_Log.csv",
-                "closed_csv": "crossfit-coach-data/data/Sessions_Closed.csv",
-            } 
-        excel = cfg.get("data_path") or cfg.get("excel_path")
-        if not excel:
-            raise ValueError("settings.json needs 'excel_path' (or 'data_path').")
-        base = Path(str(excel).replace("\\", "/")).resolve()
+    _derive_paths_local = None
 
-        def _resolve_next_to_base(value, default_name):
-            if not value:
-                return base.with_name(default_name)
-            p = Path(str(value).replace("\\", "/"))
-            # If user supplied a simple filename, place it next to the workbook
-            if not p.is_absolute() and (p.parent == Path("") or str(p).find("/") < 0):
-                return base.with_name(p.name)
-            return p
+def derive_paths(cfg: dict) -> dict:
+    # Cloud → always use GCS object paths (NO gs:// prefix)
+    if is_cloud():
+        return {
+            "excel": "crossfit-coach-data/data/CrossFit_AI_Coach_Baseline.xlsx",
+            "log_csv": "crossfit-coach-data/data/SessionsMovements_Log.csv",
+            "closed_csv": "crossfit-coach-data/data/Sessions_Closed.csv",
+        }
 
-        log_csv    = _resolve_next_to_base(cfg.get("log_csv"),    "SessionsMovements_Log.csv")
-        closed_csv = _resolve_next_to_base(cfg.get("closed_csv"), "Sessions_Closed.csv")
-        return {"excel": base, "log_csv": log_csv, "closed_csv": closed_csv}
+    # Local → use coach_io derive_paths if available, else fallback
+    if _derive_paths_local is not None:
+        return _derive_paths_local(cfg)
+
+    # Fallback local logic (your previous code)
+    excel = cfg.get("data_path") or cfg.get("excel_path")
+    if not excel:
+        raise ValueError("settings.json needs 'excel_path' (or 'data_path').")
+    base = Path(str(excel).replace("\\", "/")).resolve()
+
+    def _resolve_next_to_base(value, default_name):
+        if not value:
+            return base.with_name(default_name)
+        p = Path(str(value).replace("\\", "/"))
+        if not p.is_absolute() and (p.parent == Path("") or str(p).find("/") < 0):
+            return base.with_name(p.name)
+        return p
+
+    log_csv    = _resolve_next_to_base(cfg.get("log_csv"),    "SessionsMovements_Log.csv")
+    closed_csv = _resolve_next_to_base(cfg.get("closed_csv"), "Sessions_Closed.csv")
+    return {"excel": base, "log_csv": log_csv, "closed_csv": closed_csv}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Page config
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Athlete — Log Training", layout="wide")
 st.title("🏋️ Athlete — Log Training")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Read excel from GCS helper
+# ──────────────────────────────────────────────────────────────────────────────
+def load_excel_tables_any(excel_path):
+    """
+    Load Excel sheets from local disk (Path/str) or from GCS (cloud).
+    Returns dict of sheet_name -> DataFrame
+    """
+    if is_cloud():
+        with gcs_open(str(excel_path), "rb") as f:
+            data = f.read()
+        xls = pd.ExcelFile(io.BytesIO(data))
+        return {s: xls.parse(s) for s in xls.sheet_names}
+
+    # Local path
+    p = Path(excel_path) if not isinstance(excel_path, Path) else excel_path
+    if not p.exists():
+        return {}
+    xls = pd.ExcelFile(p)
+    return {s: xls.parse(s) for s in xls.sheet_names}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Append-only logging helpers
@@ -173,18 +204,39 @@ def get_session_logs(path: Path, session_id: str) -> pd.DataFrame:
 # ──────────────────────────────────────────────────────────────────────────────
 # Closed-session registry helpers
 # ──────────────────────────────────────────────────────────────────────────────
-def ensure_closed_csv(path: Path) -> None:
-    if not path.exists():
+def ensure_closed_csv(path) -> None:
+    if is_cloud():
+        # no-op; file may or may not exist in GCS
+        return
+    p = Path(path)
+    if not p.exists():
         cols = ["SessionID", "ClosedBy", "ClosedAt", "Notes"]
-        pd.DataFrame(columns=cols).to_csv(path, index=False)
+        pd.DataFrame(columns=cols).to_csv(p, index=False)
 
-def load_closed_sessions(path: Path) -> pd.DataFrame:
-    ensure_closed_csv(path)
-    return pd.read_csv(path)
+def load_closed_sessions(path) -> pd.DataFrame:
+    cols = ["SessionID", "ClosedBy", "ClosedAt", "Notes"]
+    try:
+        if is_cloud():
+            with gcs_open(str(path), "r") as f:
+                return pd.read_csv(f)
+        else:
+            ensure_closed_csv(path)
+            return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame(columns=cols)
 
-def is_session_closed(path: Path, session_id: str) -> bool:
+def save_closed_sessions(path, df: pd.DataFrame) -> None:
+    if is_cloud():
+        with gcs_open(str(path), "w") as f:
+            df.to_csv(f, index=False)
+    else:
+        df.to_csv(path, index=False)
+
+def is_session_closed(path, session_id: str) -> bool:
     df = load_closed_sessions(path)
-    return session_id in set(df["SessionID"].astype(str))
+    if df.empty or "SessionID" not in df.columns:
+        return False
+    return str(session_id).strip() in set(df["SessionID"].astype(str).str.strip())
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Small parsing helpers
@@ -350,7 +402,7 @@ def program_progress_for_selected(sel_join: str,
 cfg = load_settings("data/settings.json")
 paths = derive_paths(cfg)
 
-_raw = load_excel_tables(paths["excel"])
+_raw = load_excel_tables_any(paths["excel"])
 tables = {
     "programs":          _raw.get(cfg["sheets"]["programs"], pd.DataFrame()),
     "sessions":          _raw.get(cfg["sheets"]["sessions"], pd.DataFrame()),
@@ -372,8 +424,9 @@ if progs.empty or sess.empty or movs.empty:
     st.stop()
 
 # Ensure CSVs exist / are well-formed
-ensure_log_csv(paths["log_csv"])
-ensure_closed_csv(paths["closed_csv"])
+if not is_cloud():
+    ensure_log_csv(paths["log_csv"])
+    ensure_closed_csv(paths["closed_csv"])
 
 # Sidebar: quick settings + display preferences
 with st.sidebar:
@@ -600,13 +653,13 @@ with left:
             "ClosedAt": datetime.now().isoformat(timespec="seconds"),
             "Notes": ""
         }])], ignore_index=True)
-        df.to_csv(paths["closed_csv"], index=False)
+        save_closed_sessions(paths["closed_csv"], df)
         st.experimental_rerun()
 with right:
     if this_closed and st.button("🔓 Reopen session"):
         df = load_closed_sessions(paths["closed_csv"])
         df = df[df["SessionID"].astype(str) != str(sel_sess)]
-        df.to_csv(paths["closed_csv"], index=False)
+        save_closed_sessions(paths["closed_csv"], df)
         st.experimental_rerun()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -837,10 +890,7 @@ else:
                 reps_p = cycles_p if cycles_p is not None else safe_int(rx.get("Reps"), 0)
 
             # Use computed FinalLoad as the prescribed default
-            load_p = safe_float(rx.get("FinalLoad"), None)
-            # If missing, fall back to the (possibly) pre-existing rounded
-            if load_p is None:
-                load_p = safe_float(rx.get("Load_Prescribed_Rounded"), None)
+            load_p = safe_float(rx.get("Load_Prescribed_Rounded"), None)
 
             # Use session-entered % if present, else the PercentUsed from compute
             pct_p = rx.get("Pct1RM_Prescribed", rx.get("PercentUsed", None))
