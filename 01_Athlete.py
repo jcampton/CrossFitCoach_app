@@ -60,8 +60,19 @@ def _split_bucket_key(path: str) -> tuple[str, str]:
 
 @st.cache_resource(show_spinner=False)
 def _gcs_client():
-    # secrets must be flat under [connections.gcs] like the JSON key file fields
     sa = dict(st.secrets["connections"]["gcs"])
+
+    # ---- FIX: normalize private_key formatting ----
+    pk = sa.get("private_key", "")
+    # If the key contains literal "\n" sequences, convert to real newlines
+    pk = pk.replace("\\n", "\n")
+    # Remove surrounding quotes if someone pasted them
+    pk = pk.strip().strip('"').strip("'")
+    # Ensure it ends with a newline (PEM parsers like this)
+    if not pk.endswith("\n"):
+        pk += "\n"
+    sa["private_key"] = pk
+
     creds = service_account.Credentials.from_service_account_info(sa)
     return storage.Client(project=sa.get("project_id"), credentials=creds)
 
