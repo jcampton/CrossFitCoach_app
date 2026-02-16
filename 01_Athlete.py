@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gcsfs
 import io
 import json
 import re
@@ -46,9 +47,26 @@ def _strip_gcs_scheme(p: str) -> str:
     return p
 
 @st.cache_resource(show_spinner=False)
-def _gcs_conn():
-    # Always bind the FilesConnection type explicitly. [1](https://environmentnswgov.sharepoint.com/sites/Home/SitePages/Home.aspx?web=1)
-    return st.connection("gcs", type=FilesConnection)
+def _gcs_fs():
+    creds = dict(st.secrets["connections"]["gcs"])
+
+    # Explicitly construct service-account credentials
+    fs = gcsfs.GCSFileSystem(
+        project=creds["project_id"],
+        token={
+            "type": "service_account",
+            "project_id": creds["project_id"],
+            "private_key_id": creds["private_key_id"],
+            "private_key": creds["private_key"],
+            "client_email": creds["client_email"],
+            "client_id": creds["client_id"],
+            "auth_uri": creds["auth_uri"],
+            "token_uri": creds["token_uri"],
+            "auth_provider_x509_cert_url": creds["auth_provider_x509_cert_url"],
+            "client_x509_cert_url": creds["client_x509_cert_url"],
+        },
+    )
+    return fs
 
 def assert_gcs_configured() -> None:
     """Fail fast with a readable message if secrets aren't present."""
@@ -63,9 +81,8 @@ def assert_gcs_configured() -> None:
         )
         st.stop()
 
-def gcs_open(path: str, mode: str = "rb"):
-    assert_gcs_configured()
-    return _gcs_conn().open(_strip_gcs_scheme(path), mode)
+def gcs_open(path, mode="rb"):
+    return _gcs_fs().open(_strip_gcs_scheme(path), mode)
 
 def gcs_exists(path: str) -> bool:
     assert_gcs_configured()
