@@ -20,12 +20,13 @@ from st_files_connection import FilesConnection
 
 from coach_io import (
     load_settings,
-    derive_paths,
     pick_series,
     round_to_increment,
     ensure_arrow_compat,
+    compute_prescribed_loads,
     build_one_rm_lookup,
 )
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Cloud / GCS helpers (single source of truth)
 # ──────────────────────────────────────────────────────────────────────────────
