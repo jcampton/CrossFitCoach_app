@@ -34,8 +34,11 @@ from coach_io import (
 # Cloud / GCS helpers (single source of truth)
 # ──────────────────────────────────────────────────────────────────────────────
 
+from google.cloud import storage
+from google.oauth2 import service_account
+from contextlib import contextmanager
+
 def is_cloud() -> bool:
-    """Best-effort check for Streamlit runtime."""
     try:
         return hasattr(st, "runtime") and st.runtime.exists()
     except Exception:
@@ -47,49 +50,62 @@ def _strip_gcs_scheme(p: str) -> str:
         return p.split("://", 1)[1]
     return p
 
+def _split_bucket_key(path: str) -> tuple[str, str]:
+    """Accepts 'bucket/key' or 'gs://bucket/key'."""
+    p = _strip_gcs_scheme(path).lstrip("/")
+    if "/" not in p:
+        raise ValueError(f"GCS path must be 'bucket/object'. Got: {path}")
+    bucket, key = p.split("/", 1)
+    return bucket, key
+
 @st.cache_resource(show_spinner=False)
-def _gcs_fs():
-    # Grab the flat service account JSON fields from Streamlit secrets
+def _gcs_client():
+    # secrets must be flat under [connections.gcs] like the JSON key file fields
     sa = dict(st.secrets["connections"]["gcs"])
-
-    # Force service-account credentials object (avoids refresh_token path)
-    scopes = ["https://www.googleapis.com/auth/devstorage.read_write"]
-    creds_obj = service_account.Credentials.from_service_account_info(sa, scopes=scopes)
-
-    # Feed gcsfs a Credentials object instead of a dict
-    return gcsfs.GCSFileSystem(project=sa.get("project_id"), token=creds_obj)
-
-def assert_gcs_configured() -> None:
-    """Fail fast with a readable message if secrets aren't present."""
-    if not is_cloud():
-        return
-    try:
-        _ = st.secrets["connections"]["gcs"]
-    except Exception:
-        st.error(
-            "GCS secrets not found.\n\n"
-            "Add a [connections.gcs] section (service account JSON fields) in Streamlit Secrets."
-        )
-        st.stop()
-
-def gcs_open(path, mode="rb"):
-    return _gcs_fs().open(_strip_gcs_scheme(path), mode)
+    creds = service_account.Credentials.from_service_account_info(sa)
+    return storage.Client(project=sa.get("project_id"), credentials=creds)
 
 def gcs_exists(path: str) -> bool:
-    assert_gcs_configured()
-    try:
-        return _gcs_conn().fs.exists(_strip_gcs_scheme(path))
-    except Exception:
+    client = _gcs_client()
+    bucket_name, blob_name = _split_bucket_key(path)
+    blob = client.bucket(bucket_name).blob(blob_name)
+    return blob.exists(client)
+
+def gcs_read_bytes(path: str) -> bytes:
+    client = _gcs_client()
+    bucket_name, blob_name = _split_bucket_key(path)
+    blob = client.bucket(bucket_name).blob(blob_name)
+    return blob.download_as_bytes(client=client)
+
+def gcs_write_bytes(path: str, data: bytes, content_type: str | None = None) -> None:
+    client = _gcs_client()
+    bucket_name, blob_name = _split_bucket_key(path)
+    blob = client.bucket(bucket_name).blob(blob_name)
+    blob.upload_from_string(data, content_type=content_type)
+
+@contextmanager
+def gcs_open(path: str, mode: str = "rb"):
+    """
+    Minimal file-like interface:
+      - rb: returns BytesIO for reading
+      - wb/wt/at: buffers then uploads on close
+    """
+    if "r" in mode:
+        bio = BytesIO(gcs_read_bytes(path))
+        yield bio
+        return
+
+    # write/append modes: read existing if append requested
+    buffer = BytesIO()
+    if "a" in mode:
         try:
-            with gcs_open(path, "rb"):
-                return True
+            buffer.write(gcs_read_bytes(path))
         except Exception:
-            return False
-
-PathLike = Union[str, Path]
-
-def _as_text_path(p: PathLike) -> str:
-    return _strip_gcs_scheme(str(p))
+            pass
+    yield buffer
+    # upload on close
+    gcs_write_bytes(path, buffer.getvalue(),
+                    content_type="text/csv" if ("t" in mode or "a" in mode) else None)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -119,25 +135,12 @@ def load_excel_tables_any(excel_path):
     return {s: xls.parse(s) for s in xls.sheet_names}
 
 def load_excel_tables_cloudaware(workbook_path: PathLike) -> dict[str, pd.DataFrame]:
-    """
-    Always load the workbook from its true source:
-    - GCS: gcs_open -> BytesIO -> pd.ExcelFile
-    - Local: pd.ExcelFile(Path)
-    """
     if is_cloud():
-        p = _as_text_path(workbook_path)
+        p = _strip_gcs_scheme(str(workbook_path))
         with gcs_open(p, "rb") as f:
             data = f.read()
-        bio = BytesIO(data)
-        xls = pd.ExcelFile(bio)
+        xls = pd.ExcelFile(BytesIO(data))
         return {s: xls.parse(s) for s in xls.sheet_names}
-
-    from pathlib import Path
-    p = Path(workbook_path)
-    if not p.exists():
-        return {}
-    xls = pd.ExcelFile(p)
-    return {s: xls.parse(s) for s in xls.sheet_names}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Append-only logging helpers

@@ -4,3 +4,4 @@ openpyxl
 st-files-connection
 gcsfs
 fsspec
+google-cloud-storage
