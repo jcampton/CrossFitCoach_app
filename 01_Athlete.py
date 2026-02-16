@@ -18,6 +18,7 @@ import pandas as pd
 import streamlit as st
 from st_files_connection import FilesConnection
 
+from coach_io import derive_paths
 from coach_io import (
     load_settings,
     pick_series,
