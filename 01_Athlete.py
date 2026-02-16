@@ -19,6 +19,7 @@ import pandas as pd
 import streamlit as st
 from st_files_connection import FilesConnection
 
+from google.oauth2 import service_account
 from coach_io import derive_paths
 from coach_io import (
     load_settings,
@@ -48,25 +49,15 @@ def _strip_gcs_scheme(p: str) -> str:
 
 @st.cache_resource(show_spinner=False)
 def _gcs_fs():
-    creds = dict(st.secrets["connections"]["gcs"])
+    # Grab the flat service account JSON fields from Streamlit secrets
+    sa = dict(st.secrets["connections"]["gcs"])
 
-    # Explicitly construct service-account credentials
-    fs = gcsfs.GCSFileSystem(
-        project=creds["project_id"],
-        token={
-            "type": "service_account",
-            "project_id": creds["project_id"],
-            "private_key_id": creds["private_key_id"],
-            "private_key": creds["private_key"],
-            "client_email": creds["client_email"],
-            "client_id": creds["client_id"],
-            "auth_uri": creds["auth_uri"],
-            "token_uri": creds["token_uri"],
-            "auth_provider_x509_cert_url": creds["auth_provider_x509_cert_url"],
-            "client_x509_cert_url": creds["client_x509_cert_url"],
-        },
-    )
-    return fs
+    # Force service-account credentials object (avoids refresh_token path)
+    scopes = ["https://www.googleapis.com/auth/devstorage.read_write"]
+    creds_obj = service_account.Credentials.from_service_account_info(sa, scopes=scopes)
+
+    # Feed gcsfs a Credentials object instead of a dict
+    return gcsfs.GCSFileSystem(project=sa.get("project_id"), token=creds_obj)
 
 def assert_gcs_configured() -> None:
     """Fail fast with a readable message if secrets aren't present."""
